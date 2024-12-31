@@ -82,6 +82,7 @@ class InfiniteTensor:
             dtype: PyTorch data type for the tensor (default: torch.float32)
             tile_init_fn: Function to initialize tiles with. If None, tiles are initialized with the default value.
                 The function takes the tile coordinates as a tuple of integers, the desired size of the tile as a tuple, and returns a tensor of the appropriate size.
+                Example: lambda tile_index, tile_shape: torch.randn(tile_shape)
         """
         self._shape = shape
         if isinstance(chunk_size, int):
@@ -107,7 +108,8 @@ class InfiniteTensor:
         self._tile_bytes = np.prod(list(self._tile_shape)) * self._dtype.itemsize
         
         # Open temporary file
-        self._file_path = tempfile.NamedTemporaryFile(suffix='.h5', delete=True).name
+        self._dir_path = tempfile.TemporaryDirectory(delete=True)
+        self._file_path = os.path.join(self._dir_path.name, f'tensor.h5')
         self._h5file = h5py.File(self._file_path, 'w')
         self._cleanup_done = False
     
@@ -493,8 +495,12 @@ class InfiniteTensor:
                 except (OSError, PermissionError):
                     pass  # Best effort deletion
             self._cleanup_done = True
+            
+    @classmethod
+    def apply(cls, f, args, kwargs, args_windows, kwargs_windows):
+        pass
 
-class SlidingWindow:
+class TensorWindow:
     def __init__(self, tensor: InfiniteTensor, 
                  window_size: tuple[int, ...], 
                  window_stride: tuple[int, ...], 
@@ -629,17 +635,17 @@ class InfiniteTensorResult(InfiniteTensor):
         self.f = f
         self.args = args
         self.kwargs = kwargs
-        self._sliding_window = SlidingWindow(None,
+        self._sliding_window = TensorWindow(None,
                                              window_size if isinstance(window_size, tuple) else (window_size,) * len(self._tile_shape),
                                              window_stride if isinstance(window_stride, tuple) else (window_stride,) * len(self._tile_shape),
                                              window_offset if isinstance(window_offset, tuple) else (window_offset,) * len(self._tile_shape))
         self.output_weights = output_weights
         for x in args:
-            if isinstance(x, SlidingWindow):
+            if isinstance(x, TensorWindow):
                 assert x.tensor is not None, "SlidingWindow must be initialized with a tensor"
                 self._operators.append(x.tensor)
         for v in kwargs.values():
-            if isinstance(v, SlidingWindow):
+            if isinstance(v, TensorWindow):
                 assert v.tensor is not None, "SlidingWindow must be initialized with a tensor"
                 self._operators.append(v.tensor)
     
@@ -666,11 +672,11 @@ class InfiniteTensorResult(InfiniteTensor):
             
             # If the window has not been processed, prepare the input tensors
             for arg in self.args:
-                if isinstance(arg, SlidingWindow):
+                if isinstance(arg, TensorWindow):
                     input_bounds = arg.get_bounds(*window_index)
                     arg.tensor.queue_prepare_range(input_bounds)
             for v in self.kwargs.values():
-                if isinstance(v, SlidingWindow):
+                if isinstance(v, TensorWindow):
                     input_bounds = v.get_bounds(*window_index)
                     v.tensor.queue_prepare_range(input_bounds)
                 
@@ -683,13 +689,13 @@ class InfiniteTensorResult(InfiniteTensor):
             args = []
             kwargs = {}
             for arg in self.args:
-                if isinstance(arg, SlidingWindow):
+                if isinstance(arg, TensorWindow):
                     input_bounds = self.infinite_to_finite_indices(arg.get_bounds(*window_index))
                     args.append(arg.tensor[input_bounds])
                 else:
                     args.append(arg)
             for k, v in self.kwargs.items():
-                if isinstance(v, SlidingWindow):
+                if isinstance(v, TensorWindow):
                     input_bounds = self.infinite_to_finite_indices(v.get_bounds(*window_index))
                     kwargs[k] = v.tensor[input_bounds]
                 else:

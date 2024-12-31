@@ -18,11 +18,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pypa/sampleproject"
-Issues = "https://github.com/pypa/sampleproject/issues"
+Homepage = "https://github.com/xandergoslin/infinite_tensors"
+Issues = "https://github.com/xandergoslin/infinite_tensors/issues"
 
 [tool.pytest.ini_options]
 addopts = [
     "--import-mode=importlib",
 ]
-pythonpath = "src"
+pythonpath = "infinite_tensors"

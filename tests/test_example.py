@@ -1,4 +1,4 @@
-from infinite_tensors import *
+from infinite_tensors.infinite_tensors import *
 import numpy as np
 import torch
 
@@ -28,7 +28,7 @@ def test_infinite_tensor():
     init_fn = lambda indices, shape: torch.rand(shape)
     t = InfiniteTensor((10, None, None), tile_init_fn=init_fn)
     n = InfiniteTensorResult(inverse_gaussian_cdf, 
-                             args=[SlidingWindow(t, 256, 256)],
+                             args=[TensorWindow(t, 256, 256)],
                              kwargs={},
                              window_size=256,
                              window_stride=128,
