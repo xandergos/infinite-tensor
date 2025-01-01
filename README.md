@@ -15,7 +15,7 @@ from scipy import stats
 # Create an infinite tensor with shape (1, None, None)
 # The tensor will, by default, be initialized with a random uniform value between 0 and 1
 t = InfiniteTensor((1, None, None),
-                   tile_init_fn=lambda tile_index, tile_shape: torch.rand(tile_shape))
+                   init_fn=lambda tile_index, tile_shape: torch.rand(tile_shape))
 
 # Define a function we will apply to the tensor
 def inverse_gaussian_cdf(x: torch.Tensor) -> torch.Tensor:
@@ -25,9 +25,11 @@ def inverse_gaussian_cdf(x: torch.Tensor) -> torch.Tensor:
     return torch.from_numpy(result).to(x.dtype)
 
 # Apply the function to the tensor, resulting in a new infinite tensor
-result = InfiniteTensor.apply(inverse_gaussian_cdf, 
-                              args=[t], 
-                              kwargs={}, 
-                              args_windows=[TensorWindow(t, kernel_size=(256, 256), stride=(256, 256))], 
-                              kwargs_windows={})
+result = InfiniteTensor((1, None, None), # Shape of the output tensor
+                        TensorWindow(t, kernel_size=(256, 256), stride=(256, 256)), # Output window
+                        inverse_gaussian_cdf, # Function to apply
+                        args=[t], # Arguments to pass to the function
+                        kwargs={}, # Keyword arguments to pass to the function
+                        args_windows=[TensorWindow(t, kernel_size=(256, 256), stride=(256, 256))], # Windows for input infinite tensors arguments
+                        kwargs_windows={}) # Windows for input infinite tensors keyword arguments
 ```
