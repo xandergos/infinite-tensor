@@ -219,6 +219,8 @@ class InfiniteTensor:
         output_tensor = torch.empty(output_shape, dtype=self._dtype)
         for tile_index in itertools.product(*tile_ranges):
             tile = self._store.get(self._get_tile_key(tile_index))
+            if tile is None:
+                raise RuntimeError(f"Tile has been deleted. This is either a bug, or you are trying to directly access a tensor after it has been marked for cleanup.")
             intersected_indices = self._intersect_slices(indices, tile_index)
             tile_space_indices = self._translate_slices(intersected_indices, tile_index)
             output_indices = tuple(slice((s.start - n.start) // s.step, (s.stop - n.start + s.step - 1) // s.step)
@@ -279,6 +281,8 @@ class InfiniteTensor:
         # Set values in tiles
         for tile_index in itertools.product(*tile_ranges):
             tile = self._store.get(self._get_tile_key(tile_index))
+            if tile is None:
+                raise RuntimeError(f"Tile has been deleted. This is either a bug, or you are trying to directly access a tensor after it has been marked for cleanup.")
             intersected_indices = self._intersect_slices(indices, tile_index)
             tile_space_indices = self._translate_slices(intersected_indices, tile_index)
             value_indices = tuple(slice((s.start - n.start) // s.step, (s.stop - n.start - 1) // s.step + 1)
@@ -287,7 +291,7 @@ class InfiniteTensor:
             tile.values[tile_space_indices] = value[value_indices]
             self._store.set(self._get_tile_key(tile_index), tile)
             
-    def _add_op(self, indices: tuple[int|slice, ...], value: torch.Tensor, window_index: tuple[int, ...]):
+    def _add_op(self, indices: tuple[int|slice, ...], value: torch.Tensor):
         """Shortcut for self[indices] = self[indices] + value.
         Also tracks which windows have been processed.
 
@@ -359,7 +363,7 @@ class InfiniteTensor:
             else:
                 kwargs[kwarg] = self._kwargs[kwarg]
         output = self._f(window_index, *args, **kwargs)
-        self._add_op(self._output_window.get_bounds(window_index), output, window_index)
+        self._add_op(self._output_window.get_bounds(window_index), output)
         
         for i, arg in enumerate(self._args):
             if isinstance(arg, InfiniteTensor):
@@ -421,10 +425,10 @@ class InfiniteTensor:
         return False  # Don't suppress any exceptions
 
     def __del__(self):
-        self.cleanup()
+        self.mark_for_cleanup()
                 
-    def cleanup(self):
-        """Clean up unneeded resources used by this tensor."""
+    def mark_for_cleanup(self):
+        """Mark this tensor for cleanup."""
         if not self._marked_for_cleanup:
             for uuid, tile_index in self._store.keys():
                 if not self._is_tile_needed(tile_index):

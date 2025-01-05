@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "torch"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "infinite_tensors"
+name = "infinite-tensor"
 version = "0.0.1"
 authors = [
   { name="Alexander Goslin", email="alexander.goslin@gmail.com" },
@@ -18,8 +18,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/xandergoslin/infinite_tensors"
-Issues = "https://github.com/xandergoslin/infinite_tensors/issues"
+Homepage = "https://github.com/xandergoslin/infinite-tensor"
+Issues = "https://github.com/xandergoslin/infinite-tensor/issues"
 
 [tool.pytest.ini_options]
 addopts = [
