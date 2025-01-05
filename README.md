@@ -31,11 +31,11 @@ When a tile is no longer needed by any infinite tensors, it is automatically del
 ### Clamping random numbers
 ```python
 def random_generator(ctx):
-    # Generate a random 100x100x3 tensor with values between 0 and 0.5
-    return torch.rand((3, 100, 100)) * 0.5
+    # Generate a random 100x100x3 tensor with values between 0 and 1
+    return torch.rand((3, 100, 100))
 
 def clamp_values(ctx, input_tensor):
-    # Simply multiply each value by 2
+    # Clamp each value to be between 0.25 and 0.75
     return torch.clamp(input_tensor, 0.25, 0.75)
 
 # Create base random tensor
@@ -57,10 +57,10 @@ doubled_tensor = InfiniteTensor(
 # Visualize the results
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
-ax1.imshow(base_tensor[:, :100, :100].permute(1, 2, 0).numpy())
-ax1.set_title('Original Random Values (0-0.5)')
+ax1.imshow(base_tensor[:, :100, :100].permute(1, 2, 0).numpy(), vmin=0, vmax=1)
+ax1.set_title('Original Random Values (0-1)')
 
-ax2.imshow(doubled_tensor[:, :100, :100].permute(1, 2, 0).numpy())
+ax2.imshow(doubled_tensor[:, :100, :100].permute(1, 2, 0).numpy(), vmin=0, vmax=1)
 ax2.set_title('Clamped Values (0.25-0.75)')
 
 plt.show()
