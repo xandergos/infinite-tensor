@@ -255,6 +255,10 @@ class InfiniteTensor:
             # Mix integers and slices
             tensor[0, :, 0:10] = torch.ones(5, 10)
         """
+        if self._dependency_windows:
+            raise NotImplementedError("Setting values on infinite tensors with dependencies is not supported, as the tensor's state may be inconsistent. "
+                                      "Please set values before creating any dependent tensors.")
+        
         indices, collapse_dims = standardize_indices(self._shape, indices)
         tile_ranges = self._pixel_slices_to_tile_ranges(indices)
         
