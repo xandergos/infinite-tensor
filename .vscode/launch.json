@@ -10,6 +10,18 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal"
-        }
+        },
+        {
+            "name": "Python: Pytest",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "-v",
+                "tests/"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
     ]
 }

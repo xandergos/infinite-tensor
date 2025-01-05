@@ -25,4 +25,4 @@ Issues = "https://github.com/xandergoslin/infinite_tensors/issues"
 addopts = [
     "--import-mode=importlib",
 ]
-pythonpath = "infinite_tensors"
+pythonpath = "."
