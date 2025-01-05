@@ -4,6 +4,11 @@ A Python library for performing operations on theoretically infinite tensors usi
 
 ## Installation
 
+Install using pip:
+```bash
+pip install git+https://github.com/xandergos/infinite-tensor.git
+```
+
 ## Basic Usage
 
 ### Creating an Infinite Tensor
@@ -18,6 +23,8 @@ An infinite tensor is created by specifying:
 
 You can create new tensors that depend on existing ones. The library handles dependencies and memory management automatically: When a tile of a tensor is not needed anymore, it is automatically deleted. To indicate that a tensor is no longer needed by anything but another infinite tensors, you can call tensor.mark_for_cleanup().
 When a tile is no longer needed by any infinite tensors, it is automatically deleted to save memory.
+
+**Important:** You cannot set values on infinite tensors with dependencies. This is because the tensor's state may be inconsistent. Please set values before creating any dependent tensors.
 
 ## Examples
 
