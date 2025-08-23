@@ -6,17 +6,47 @@ from infinite_tensors.utils import normalize_slice
 
 
 class TensorWindow:
+    """A sliding window specification for processing infinite tensors.
+    
+    TensorWindow defines how to slice infinite tensors for processing. It supports:
+    - Variable window sizes and strides for different processing patterns
+    - Offset windows for padding/boundary handling 
+    - Dimension mapping for reshaping data during processing
+    
+    This is a core abstraction that enables efficient sliding window operations
+    on infinite tensors without loading entire datasets into memory.
+    """
+    
     def __init__(self,
                  window_size: tuple[int, ...], 
                  window_stride: tuple[int, ...] = None, 
-                 window_offset: tuple[int, ...] = 0):
-        """A sliding window that can be used to apply a function to an infinite tensor.
+                 window_offset: tuple[int, ...] = None,
+                 dimension_map: tuple[int | None, ...] = None):
+        """Initialize a tensor window specification.
         
         Args:
-            window_size (tuple[int, ...]): The size of the window for each dimension.
-            window_stride (tuple[int, ...]): The stride between windows for each dimension.
-            window_offset (tuple[int, ...], optional): The offset of the window for each dimension. 
-                Defaults to 0, where the top-left corner of the window at index (0, 0, ...) is at the origin.
+            window_size: Size of the window for each dimension. Determines how much
+                        data is included in each window slice.
+            window_stride: Stride between consecutive windows. Defaults to window_size
+                          (non-overlapping windows). Use smaller strides for overlapping
+                          windows (e.g., for convolution-like operations).
+            window_offset: Starting offset for the first window. Useful for:
+                          - Padding: negative offsets to include boundary regions
+                          - Alignment: positive offsets to skip initial data
+                          Defaults to (0, 0, ...) placing first window at origin.
+            dimension_map: Maps input dimensions to output dimensions. Each position
+                          represents an output dimension, value indicates which input
+                          dimension to use (None = default slice(0,1)).
+                          
+                Examples:
+                - (0, 1, 2): Identity mapping (no reordering)
+                - (2, 0, 1): Dimension rotation
+                - (None, 1, 0): 3D output from 2D input with added dimension
+                - (1, 0): Transpose 2D dimensions
+                
+        Raises:
+            ValueError: If parameter lengths don't match window_size length
+            AssertionError: If window_size is not a tuple
         """
         assert not isinstance(window_size, int), "window_size must be a tuple"
         if isinstance(window_stride, int):
@@ -25,19 +55,70 @@ class TensorWindow:
             window_offset = (window_offset,) * len(window_size)
         self.window_size = window_size
         self.window_stride = window_stride or window_size
-        self.window_offset = window_offset
+        self.window_offset = window_offset or (0,) * len(window_size)
+        self.dimension_map = dimension_map
         self._uuid = uuid.uuid4()
+        
+        # Verify all window parameters have same length
+        if len(self.window_stride) != len(self.window_size):
+            raise ValueError(f"window_stride length ({len(self.window_stride)}) must match window_size length ({len(self.window_size)})")
+        if len(self.window_offset) != len(self.window_size):
+            raise ValueError(f"window_offset length ({len(self.window_offset)}) must match window_size length ({len(self.window_size)})")
+        if self.dimension_map is not None and len(self.dimension_map) != len(self.window_size):
+            raise ValueError(f"dimension_map length ({len(self.dimension_map)}) must match window_size length ({len(self.window_size)})")
         
     @property
     def uuid(self) -> UUID:
         return self._uuid
+    
+    def map_window_slices(self, input_slices: tuple[slice, ...]) -> tuple[slice, ...]:
+        """Apply dimension mapping to transform input slices to output slices.
         
-    def get_lowest_intersection(self, point: tuple[int|slice, ...]) -> tuple[int, ...]:
-        """Returns the lowest window index that intersects with the given point.
-        If there is no window that intersects, returns the next window index.
+        This is a key operation for handling cases where the input and output tensors
+        have different dimension arrangements. For example, when adding a batch dimension
+        or transposing spatial dimensions.
         
         Args:
-            point (tuple[int | slice, ...]): The point to check for intersection. Can be a tuple of ints or slices.
+            input_slices: Window slices in the input tensor's dimension order
+            
+        Returns:
+            Window slices reordered according to dimension_map. Dimensions mapped
+            to None receive a default slice(0, 1) to add singleton dimensions.
+            
+        Example:
+            If dimension_map=(1, 0) and input_slices=(slice(0,10), slice(5,15)),
+            returns (slice(5,15), slice(0,10)) - dimensions are swapped.
+        """
+        if self.dimension_map is None:
+            return input_slices
+            
+        output_slices = []
+        for dim_idx in self.dimension_map:
+            if dim_idx is None:
+                output_slices.append(slice(0, 1))
+            else:
+                output_slices.append(input_slices[dim_idx])
+        
+        return tuple(output_slices)
+        
+    def get_lowest_intersection(self, point: tuple[int|slice, ...]) -> tuple[int, ...]:
+        """Find the lowest-indexed window that intersects with a given point/region.
+        
+        This is essential for determining the starting window when processing a region.
+        The algorithm finds the first window whose extent overlaps with the given point.
+        
+        Args:
+            point: Point or region to check for intersection. Can mix integers 
+                  (single coordinates) and slices (ranges). For slices, uses 
+                  the start coordinate.
+        
+        Returns:
+            Tuple of window indices representing the lowest window that intersects
+            the given point. If no intersection exists, returns the next window.
+            
+        Mathematical Details:
+            For each dimension, solves: point < window_index * stride + offset + size
+            This finds the smallest window_index where the window end is beyond the point.
         """
         # Calculate window indices that would contain this point
         window_indices = []
@@ -62,7 +143,23 @@ class TensorWindow:
         return tuple(window_indices)
         
     def get_highest_intersection(self, point: tuple[int|slice, ...]) -> tuple[int, ...]:
-        """Returns the highest window index that intersects with the given point."""
+        """Find the highest-indexed window that intersects with a given point/region.
+        
+        This determines the ending window when processing a region. Combined with
+        get_lowest_intersection, defines the complete range of windows needed.
+        
+        Args:
+            point: Point or region to check. For slices, uses the stop-1 coordinate
+                  (last included point).
+        
+        Returns:
+            Tuple of window indices representing the highest window that intersects
+            the given point.
+            
+        Mathematical Details:
+            For each dimension, solves: point >= window_index * stride + offset
+            This finds the largest window_index where the window start is at or before the point.
+        """
         # Calculate window indices that would contain this point
         window_indices = []
         for p, w, s, o in zip(point, self.window_size, self.window_stride, self.window_offset):
@@ -81,17 +178,62 @@ class TensorWindow:
             
         return tuple(window_indices)
     
-    def pixel_range_to_window_range(self, pixel_ranges: tuple[slice, ...]) -> tuple[slice, ...]:
-        """Returns the window ranges that intersect with the given pixel ranges. Returns None if there is no intersection.
-        Pixel ranges are expected to be infinite pixel ranges."""
+    def pixel_range_to_window_range(self, pixel_ranges: tuple[slice, ...]) -> tuple[slice, ...] | None:
+        """Convert pixel coordinate ranges to window index ranges.
+        
+        This is a critical function for dependency tracking. It determines which
+        windows in a dependent tensor need to be processed when a tile in this
+        tensor is accessed.
+        
+        Args:
+            pixel_ranges: Tuple of slices defining pixel regions in infinite dimensions
+            
+        Returns:
+            Tuple of slices defining window ranges that intersect the pixel regions,
+            or None if there's no intersection (pixel range falls between windows).
+            
+        Use Cases:
+            - Determining which windows to process for a given pixel access
+            - Calculating dependencies between tensors with different window patterns
+            - Memory management: knowing when tiles can be safely deleted
+        """
         lowest_intersection = self.get_lowest_intersection((p.start for p in pixel_ranges))
         highest_intersection = self.get_highest_intersection((p.stop - 1 for p in pixel_ranges))
         if any(l > h for l, h in zip(lowest_intersection, highest_intersection)):
             return None  # This means one of the pixel ranges is between two windows
         return tuple(slice(l, h + 1) for l, h in zip(lowest_intersection, highest_intersection))
     
-    def get_bounds(self, window_slices: tuple[slice, ...]) -> tuple[slice, ...]:
-        """Returns the bounds of the given window slices in pixel space."""
+    def get_bounds(self, window_slices: tuple[slice, ...], map_slices: bool = True) -> tuple[slice, ...]:
+        """Convert window indices to pixel-space coordinates.
+        
+        This is the inverse of pixel_range_to_window_range, converting window
+        coordinates back to the pixel regions they represent. Essential for
+        slicing tensors during window processing.
+        
+        Args:
+            window_slices: Window coordinate slices to convert
+            map_slices: Whether to apply dimension mapping before conversion.
+                       Set to False when dimension mapping has already been applied.
+        
+        Returns:
+            Tuple of slices defining the pixel regions covered by the windows
+            
+        Mathematical Conversion:
+            For each dimension: pixel_start = window_index * stride + offset
+                               pixel_end = (window_index + 1) * stride + size + offset - stride
+            
+        Example:
+            Window (1, 2) with stride=(10, 10), size=(5, 5), offset=(0, 0)
+            becomes pixel bounds (slice(10, 15), slice(20, 25))
+        """
+        if map_slices:
+            window_slices = self.map_window_slices(window_slices)
         window_slices = [normalize_slice(w, None) for w in window_slices]
-        return tuple(slice(w.start * stride + offset, (w.stop - 1) * stride + size + offset)
-                     for w, stride, size, offset in zip(window_slices, self.window_stride, self.window_size, self.window_offset))
+        bounds = []
+        for i, (stride, size, offset) in enumerate(zip(self.window_stride, self.window_size, self.window_offset)):
+            w = window_slices[i]
+            # Convert window coordinates to pixel coordinates
+            # Start: window_index * stride + offset
+            # End: last_window_index * stride + offset + size 
+            bounds.append(slice(w.start * stride + offset, (w.stop - 1) * stride + size + offset))
+        return tuple(bounds)
