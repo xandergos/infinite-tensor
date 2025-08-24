@@ -97,7 +97,7 @@ base_window = TensorWindow((10, 512, 512))
 base = tile_store.get_or_create(uuid.uuid4(), (10, None, None), zeros_tensor_func, base_window)
 
 # Define an offset window for the dependent tensor
-offset_window = TensorWindow((10, 512, 512), window_offset=(0, -256, -256))
+offset_window = TensorWindow((10, 512, 512), offset=(0, -256, -256))
 
 # The function receives the upstream window directly (already sliced)
 def inc_func(ctx, prev):

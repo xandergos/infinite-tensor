@@ -132,6 +132,37 @@ def _validate_window_args(args: tuple, args_windows) -> None:
     if args_windows is not None and len(args_windows) != len(args):
         raise ValidationError(f"args_windows length {len(args_windows)} must match args length {len(args)}")
 
+def _validate_tensor_windows(
+    tensor_shape: tuple[int|None, ...],
+    output_window: TensorWindow,
+    arg_tensors: list,
+    arg_windows: list,
+) -> None:
+    """Validate that window dimensionality matches corresponding tensor dimensionality.
+
+    Ensures:
+    - output_window dims == len(tensor_shape)
+    - For each arg tensor/window pair: window dims == len(arg.shape)
+    """
+    # Validate output window dimensionality
+    if len(output_window.size) != len(tensor_shape):
+        raise ValidationError(
+            f"output_window has {len(output_window.size)} dims but tensor has {len(tensor_shape)} dims"
+        )
+
+    # Validate argument windows dimensionality
+    for i, (arg_tensor, arg_window) in enumerate(zip(arg_tensors, arg_windows)):
+        if arg_window is None:
+            # Higher-level code requires arg windows for all args; keep message focused on dims
+            continue
+        arg_tensor_shape = arg_tensor.shape
+        if arg_tensor_shape is None:
+            continue
+        if len(arg_window.size) != len(arg_tensor_shape):
+            raise ValidationError(
+                f"args_windows[{i}] has {len(arg_window.size)} dims but corresponding arg tensor has {len(arg_tensor_shape)} dims"
+            )
+
 @dataclass
 class InfinityTensorTile:
     """A single tile storing a chunk of tensor data.
@@ -209,7 +240,9 @@ class InfiniteTensor:
         # Normalize windows and args
         normalized_args = list(args or [])
         normalized_args_windows = list(args_windows) if args_windows is not None else [None] * len(normalized_args)
-        # No kwargs support
+
+        # Validate window dimensionality against tensors
+        _validate_tensor_windows(shape, output_window, normalized_args, normalized_args_windows)
 
         # Compute chunk size tuple across infinite dims
         if isinstance(chunk_size, int):
@@ -703,7 +736,7 @@ class InfiniteTensor:
         output = self.f(window_index, *args)
         
         # Verify output shape matches the expected window shape
-        expected_shape = self.output_window.window_size
+        expected_shape = self.output_window.size
         if tuple(output.shape) != tuple(expected_shape):
             raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
         
@@ -743,11 +776,11 @@ class InfiniteTensor:
     def _get_dependency_tiles(self, tile_index: tuple[int, ...]):
         """Get all tiles that this tile depends on."""
         tile_pixel_slices = self._get_tile_bounds(tile_index)
+        output_window_slices = self.output_window.pixel_range_to_window_range(tile_pixel_slices)
         
         for arg, arg_window in zip(self.args, self.args_windows):
             tensor = self._store.get_tensor(arg)
-            window_slice = arg_window.pixel_range_to_window_range(tile_pixel_slices)
-            arg_pixel_slice = arg_window.get_bounds(window_slice, map_slices=False)
+            arg_pixel_slice = arg_window.get_bounds(output_window_slices)
             arg_tile_ranges = [range(s.start, s.stop) for s in tensor._pixel_slices_to_tile_ranges(arg_pixel_slice)]
             for arg_tile_index in itertools.product(*arg_tile_ranges):
                 yield (tensor._uuid, arg_tile_index)
@@ -761,9 +794,9 @@ class InfiniteTensor:
         for tensor_id in self._store.get_dependents(self._uuid):
             tensor = self._store.get_tensor(tensor_id)
             for arg, arg_window in filter(lambda x: x[0] == self._uuid, zip(tensor.args, tensor.args_windows)):
-                window_slice = arg_window.pixel_range_to_window_range(tile_pixel_slices)
-                dependent_window_slice = arg_window.inverse_map_window_slices(window_slice, len(tensor.shape))
-                dependent_pixel_slice = tensor.output_window.get_bounds(dependent_window_slice)
+                input_window_slices = arg_window.pixel_range_to_window_range(tile_pixel_slices)
+                output_window_slices = arg_window.inverse_map_window_slices(input_window_slices, len(tensor.shape))
+                dependent_pixel_slice = tensor.output_window.get_bounds(output_window_slices)
                 dependent_tile_ranges = [range(s.start, s.stop) for s in tensor._pixel_slices_to_tile_ranges(dependent_pixel_slice)]
                 for dep_tile_index in itertools.product(*dependent_tile_ranges):
                     yield tensor_id, dep_tile_index

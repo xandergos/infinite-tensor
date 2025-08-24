@@ -24,7 +24,7 @@ An "infinite" tensor is a lazy, windowed view over data with one or more unbound
 ### `infinite_tensor/tensor_window.py`
 
 - **TensorWindow**: sliding-window spec.
-  - `window_size`, `window_stride` (default: size), `window_offset`, optional `dimension_map`.
+  - `size`, `stride` (default: size), `offset`, optional `dimension_map`.
   - Window math: `get_lowest_intersection`, `get_highest_intersection`, `pixel_range_to_window_range`, `get_bounds`, and `map_window_slices`.
   - Used for: determining which windows intersect a pixel region and converting window indices to pixel bounds; mapping between dependent tensors.
 
@@ -49,7 +49,7 @@ An "infinite" tensor is a lazy, windowed view over data with one or more unbound
 4. For each required window, if unseen:
    - Slice dependent tensors using their provided `TensorWindow.get_bounds(window_index)`.
    - Call `f(window_index, *sliced_args, **sliced_kwargs)`.
-   - Validate output shape matches `output_window.window_size`.
+   - Validate output shape matches `output_window.size`.
    - Accumulate into tiles via `_add_op`.
    - Mark dependencies' tiles as "processed" for cleanup accounting.
 5. Assemble the output tensor by intersecting requested indices with tile bounds and copying from tile-local regions; squeeze collapsed dims.
@@ -83,7 +83,7 @@ An "infinite" tensor is a lazy, windowed view over data with one or more unbound
 ## Notable constraints/quirks
 
 - Tiles and function outputs are CPU tensors; device mismatch raises an error.
-- Function outputs must exactly match `output_window.window_size`.
+- Function outputs must exactly match `output_window.size`.
 - Chunking applies only to infinite dims; finite dims are fully contained in each tile.
 
 ## Testing and examples

@@ -18,22 +18,22 @@ class TensorWindow:
     """
     
     def __init__(self,
-                 window_size: tuple[int, ...], 
-                 window_stride: tuple[int, ...] = None, 
-                 window_offset: tuple[int, ...] = None,
+                 size: tuple[int, ...],
+                 stride: tuple[int, ...] = None,
+                 offset: tuple[int, ...] = None,
                  dimension_map: tuple[int | None, ...] = None):
         """Initialize a tensor window specification.
         
         Args:
-            window_size: Size of the window for each dimension. Determines how much
-                        data is included in each window slice.
-            window_stride: Stride between consecutive windows. Defaults to window_size
-                          (non-overlapping windows). Use smaller strides for overlapping
-                          windows (e.g., for convolution-like operations).
-            window_offset: Starting offset for the first window. Useful for:
-                          - Padding: negative offsets to include boundary regions
-                          - Alignment: positive offsets to skip initial data
-                          Defaults to (0, 0, ...) placing first window at origin.
+            size: Size of the window for each dimension. Determines how much
+                  data is included in each window slice.
+            stride: Stride between consecutive windows. Defaults to size
+                    (non-overlapping windows). Use smaller strides for overlapping
+                    windows (e.g., for convolution-like operations).
+            offset: Starting offset for the first window. Useful for:
+                    - Padding: negative offsets to include boundary regions
+                    - Alignment: positive offsets to skip initial data
+                    Defaults to (0, 0, ...) placing first window at origin.
             dimension_map: Maps input dimensions to output dimensions. Each position
                           represents an output dimension, value indicates which input
                           dimension to use (None = default slice(0,1)).
@@ -45,27 +45,29 @@ class TensorWindow:
                 - (1, 0): Transpose 2D dimensions
                 
         Raises:
-            ValueError: If parameter lengths don't match window_size length
-            AssertionError: If window_size is not a tuple
+            ValueError: If parameter lengths don't match size length
+            AssertionError: If size is not a tuple
         """
-        assert not isinstance(window_size, int), "window_size must be a tuple"
-        if isinstance(window_stride, int):
-            window_stride = (window_stride,) * len(window_size)
-        if isinstance(window_offset, int):
-            window_offset = (window_offset,) * len(window_size)
-        self.window_size = window_size
-        self.window_stride = window_stride or window_size
-        self.window_offset = window_offset or (0,) * len(window_size)
+        assert not isinstance(size, int), "size must be a tuple"
+
+        if isinstance(stride, int):
+            stride = (stride,) * len(size)
+        if isinstance(offset, int):
+            offset = (offset,) * len(size)
+
+        self.size = size
+        self.stride = stride or size
+        self.offset = offset or (0,) * len(size)
         self.dimension_map = dimension_map
         self._uuid = uuid.uuid4()
         
         # Verify all window parameters have same length
-        if len(self.window_stride) != len(self.window_size):
-            raise ValueError(f"window_stride length ({len(self.window_stride)}) must match window_size length ({len(self.window_size)})")
-        if len(self.window_offset) != len(self.window_size):
-            raise ValueError(f"window_offset length ({len(self.window_offset)}) must match window_size length ({len(self.window_size)})")
-        if self.dimension_map is not None and len(self.dimension_map) != len(self.window_size):
-            raise ValueError(f"dimension_map length ({len(self.dimension_map)}) must match window_size length ({len(self.window_size)})")
+        if len(self.stride) != len(self.size):
+            raise ValueError(f"stride length ({len(self.stride)}) must match size length ({len(self.size)})")
+        if len(self.offset) != len(self.size):
+            raise ValueError(f"offset length ({len(self.offset)}) must match size length ({len(self.size)})")
+        if self.dimension_map is not None and len(self.dimension_map) != len(self.size):
+            raise ValueError(f"dimension_map length ({len(self.dimension_map)}) must match size length ({len(self.size)})")
         
     @property
     def uuid(self) -> UUID:
@@ -74,18 +76,18 @@ class TensorWindow:
     # --- Serialization helpers ---
     def to_dict(self) -> dict:
         return {
-            'window_size': list(self.window_size),
-            'window_stride': list(self.window_stride),
-            'window_offset': list(self.window_offset),
+            'size': list(self.size),
+            'stride': list(self.stride),
+            'offset': list(self.offset),
             'dimension_map': list(self.dimension_map) if self.dimension_map is not None else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "TensorWindow":
         return cls(
-            window_size=tuple(int(x) for x in data['window_size']),
-            window_stride=tuple(int(x) for x in data['window_stride']) if data.get('window_stride') is not None else None,
-            window_offset=tuple(int(x) for x in data['window_offset']) if data.get('window_offset') is not None else None,
+            size=tuple(int(x) for x in data['size']),
+            stride=tuple(int(x) for x in data['stride']) if data.get('stride') is not None else None,
+            offset=tuple(int(x) for x in data['offset']) if data.get('offset') is not None else None,
             dimension_map=tuple(None if x is None else int(x) for x in data['dimension_map']) if data.get('dimension_map') is not None else None,
         )
     
@@ -128,6 +130,7 @@ class TensorWindow:
         
         Args:
             output_slices: Window slices in the output tensor's dimension order
+            input_dims: Number of dimensions in the input tensor
             
         Returns:
             Window slices reordered to match the input tensor's dimensions.
@@ -171,7 +174,7 @@ class TensorWindow:
         """
         # Calculate window indices that would contain this point
         window_indices = []
-        for p, w, s, o in zip(point, self.window_size, self.window_stride, self.window_offset):
+        for p, w, s, o in zip(point, self.size, self.stride, self.offset):
             if isinstance(p, slice):
                 assert p.start is not None, "Slice must have a start"
                 p = p.start
@@ -211,7 +214,7 @@ class TensorWindow:
         """
         # Calculate window indices that would contain this point
         window_indices = []
-        for p, w, s, o in zip(point, self.window_size, self.window_stride, self.window_offset):
+        for p, w, s, o in zip(point, self.size, self.stride, self.offset):
             if isinstance(p, slice):
                 # For slices, use stop-1 since that's the last point included
                 assert p.stop is not None, "Slice must have a stop"
@@ -263,6 +266,7 @@ class TensorWindow:
             window_slices: Window coordinate slices to convert
             map_slices: Whether to apply dimension mapping before conversion.
                        Set to False when dimension mapping has already been applied.
+                       Should be True when converting from output window slices to input window slices.
         
         Returns:
             Tuple of slices defining the pixel regions covered by the windows
@@ -279,7 +283,7 @@ class TensorWindow:
             window_slices = self.map_window_slices(window_slices)
         window_slices = [normalize_slice(w, None) for w in window_slices]
         bounds = []
-        for i, (stride, size, offset) in enumerate(zip(self.window_stride, self.window_size, self.window_offset)):
+        for i, (stride, size, offset) in enumerate(zip(self.stride, self.size, self.offset)):
             w = window_slices[i]
             start = None if w.start is None else w.start * stride + offset
             stop = None if w.stop is None else (w.stop - 1) * stride + size + offset
@@ -288,5 +292,5 @@ class TensorWindow:
 
     # Keep repr readable for debugging/JSON dumps that might include windows
     def __repr__(self) -> str:
-        return (f"TensorWindow(size={self.window_size}, stride={self.window_stride}, "
-                f"offset={self.window_offset}, map={self.dimension_map})")
+        return (f"TensorWindow(size={self.size}, stride={self.stride}, "
+                f"offset={self.offset}, map={self.dimension_map})")

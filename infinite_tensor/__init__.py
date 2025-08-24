@@ -61,7 +61,7 @@ The library automatically manages memory through:
 See individual class documentation for detailed usage information.
 """
 
-from .infinite_tensors import InfiniteTensor, InfinityTensorTile
+from .infinite_tensor import InfiniteTensor, InfinityTensorTile
 from .tensor_window import TensorWindow
 from .tilestore import TileStore, MemoryTileStore
 from .utils import normalize_slice, standardize_indices

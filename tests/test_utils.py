@@ -3,8 +3,8 @@
 import torch
 import numpy as np
 from typing import Tuple, Callable, Optional
-from infinite_tensors.infinite_tensors import InfiniteTensor, TensorWindow
-from infinite_tensors.tilestore import MemoryTileStore
+from infinite_tensor.infinite_tensor import InfiniteTensor, TensorWindow
+from infinite_tensor.tilestore import MemoryTileStore
 import uuid
 
 
@@ -32,7 +32,7 @@ def create_test_tensor(
     
     window_kwargs = {}
     if window_stride is not None:
-        window_kwargs['window_stride'] = window_stride
+        window_kwargs['stride'] = window_stride
     
     window = TensorWindow(window_shape, **window_kwargs)
     store = kwargs.pop('tile_store', MemoryTileStore())

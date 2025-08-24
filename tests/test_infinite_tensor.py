@@ -3,8 +3,8 @@
 import pytest
 import torch
 import numpy as np
-from infinite_tensors.infinite_tensors import InfiniteTensor, TensorWindow
-from infinite_tensors.tilestore import MemoryTileStore
+from infinite_tensor.infinite_tensor import InfiniteTensor, TensorWindow
+from infinite_tensor.tilestore import MemoryTileStore
 import uuid
 
 
@@ -170,7 +170,7 @@ class TestInfiniteTensorMemoryManagement:
         base = tile_store.get_or_create(uuid.uuid4(), (10, None, None), zeros_tensor_func, basic_tensor_window)
         
         # Create offset window
-        offset_window = TensorWindow((10, 512, 512), window_offset=(0, -256, -256))
+        offset_window = TensorWindow((10, 512, 512), offset=(0, -256, -256))
         
         # Create incremented tensor with offset window
         def inc_func(ctx, prev):
@@ -197,6 +197,47 @@ class TestInfiniteTensorMemoryManagement:
         assert len(zero_tiles) == 3 * 3
 
         inc_tensor[:, -512:1024, -512:1024]
+        zero_tiles = list(filter(lambda x: torch.allclose(x.values, torch.tensor(0.0)), tile_store._tile_store.values()))
+        assert len(zero_tiles) == 5 * 5 - 1
+        
+    """Test memory management and cleanup functionality with dimension map."""
+    def test_pyramid_cleanup_2(self, tile_store):
+        """Test memory management of tensor with offset window."""
+        # Create base zeros tensor
+        def zeros_tensor_func(ctx):
+            return torch.zeros(10, 512, 512)
+        basic_tensor_window = TensorWindow((10, 512, 512))
+        base = tile_store.get_or_create(uuid.uuid4(), (10, None, None), zeros_tensor_func, basic_tensor_window)
+        
+        # Create offset window
+        offset_window_inc = TensorWindow((512, 512), offset=(-256, -256))
+        offset_window_base = TensorWindow((10, 512, 512), offset=(0, -256, -256), dimension_map=(None, 0, 1))
+        
+        # Create incremented tensor with offset window
+        def inc_func(ctx, prev):
+            return prev[0] + 1
+            
+        inc_tensor = tile_store.get_or_create(
+            uuid.uuid4(),
+            (None, None),
+            inc_func,
+            offset_window_inc,
+            args=(base,),
+            args_windows=(offset_window_base,),
+        )
+        base.mark_for_cleanup()
+        
+        # Check values at origin - should see increment
+        result = inc_tensor[0:512, 0:512]
+        expected = torch.ones_like(result)
+        assert torch.allclose(result, expected)
+
+        assert tile_store.get_tile_for(inc_tensor.uuid, (0, 0)) is not None
+        assert tile_store.get_tile_for(base.uuid, (0, 0)) is not None
+        zero_tiles = list(filter(lambda x: torch.allclose(x.values, torch.tensor(0.0)), tile_store._tile_store.values()))
+        assert len(zero_tiles) == 3 * 3
+
+        inc_tensor[-512:1024, -512:1024]
         zero_tiles = list(filter(lambda x: torch.allclose(x.values, torch.tensor(0.0)), tile_store._tile_store.values()))
         assert len(zero_tiles) == 5 * 5 - 1
 
@@ -250,4 +291,5 @@ class TestInfiniteTensorIntegration:
 if __name__ == "__main__":
     # Allow running tests directly with python
     TestInfiniteTensorMemoryManagement().test_pyramid_cleanup(MemoryTileStore())
+    TestInfiniteTensorMemoryManagement().test_pyramid_cleanup_2(MemoryTileStore())
     

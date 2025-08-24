@@ -3,8 +3,8 @@
 import pytest
 import torch
 import numpy as np
-from infinite_tensors.infinite_tensors import InfiniteTensor, TensorWindow
-from infinite_tensors.tilestore import MemoryTileStore
+from infinite_tensor.infinite_tensor import InfiniteTensor, TensorWindow
+from infinite_tensor.tilestore import MemoryTileStore
 import uuid
 
 
@@ -31,7 +31,7 @@ def tile_store():
 @pytest.fixture
 def strided_tensor_window():
     """Tensor window with custom stride for testing."""
-    return TensorWindow((10, 512, 512), window_stride=(10, 256, 256))
+    return TensorWindow((10, 512, 512), stride=(10, 256, 256))
 
 
 @pytest.fixture
