@@ -148,7 +148,7 @@ class MemoryTileStore(TileStore):
                       chunk_size: int | tuple[int, ...] = 512,
                       dtype=None):
         # Local import to avoid circular dependency
-        from infinite_tensors.infinite_tensors import InfiniteTensor, DEFAULT_DTYPE
+        from infinite_tensor.infinite_tensor import InfiniteTensor, DEFAULT_DTYPE
         # Normalize tensor_id to str, generate if missing
         try:
             # Fast path when a UUID object is passed

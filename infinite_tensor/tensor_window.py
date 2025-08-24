@@ -2,7 +2,7 @@
 from uuid import UUID
 import uuid
 
-from infinite_tensors.utils import normalize_slice
+from infinite_tensor.utils import normalize_slice
 
 
 class TensorWindow:

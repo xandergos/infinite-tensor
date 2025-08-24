@@ -17,9 +17,9 @@ from collections import OrderedDict
 import itertools
 import uuid
 
-from infinite_tensors.tensor_window import TensorWindow
-from infinite_tensors.tilestore import MemoryTileStore, TileStore
-from infinite_tensors.utils import normalize_slice, standardize_indices
+from infinite_tensor.tensor_window import TensorWindow
+from infinite_tensor.tilestore import MemoryTileStore, TileStore
+from infinite_tensor.utils import normalize_slice, standardize_indices
 
 # COORDINATE SYSTEM DEFINITIONS:
 # pixel space - Pixel space with all dimensions included (raw tensor coordinates)
