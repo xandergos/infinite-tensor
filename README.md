@@ -41,7 +41,7 @@ Always create tensors through a `TileStore`:
 ```python
 import uuid
 import torch
-from infinite_tensors import TensorWindow, MemoryTileStore
+from infinite_tensor import TensorWindow, MemoryTileStore
 
 # Create a tile store (in-memory)
 tile_store = MemoryTileStore()
@@ -86,7 +86,7 @@ Automatic windowing via `args` and `args_windows`
 ```python
 import uuid
 import torch
-from infinite_tensors import TensorWindow, MemoryTileStore
+from infinite_tensor import TensorWindow, MemoryTileStore
 
 tile_store = MemoryTileStore()
 
@@ -141,7 +141,7 @@ tensor.mark_for_cleanup()
 ```python
 import uuid
 import torch
-from infinite_tensors import TensorWindow, MemoryTileStore
+from infinite_tensor import TensorWindow, MemoryTileStore
 
 tile_store = MemoryTileStore()
 
@@ -163,7 +163,7 @@ region = image_tensor[0:512, 0:512, :]
 ```python
 import uuid
 import torch
-from infinite_tensors import TensorWindow, MemoryTileStore
+from infinite_tensor import TensorWindow, MemoryTileStore
 
 tile_store = MemoryTileStore()
 feature_size = 128

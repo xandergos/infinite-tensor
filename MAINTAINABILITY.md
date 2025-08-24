@@ -6,7 +6,7 @@ An "infinite" tensor is a lazy, windowed view over data with one or more unbound
 
 ## Modules and responsibilities
 
-### `infinite_tensors/infinite_tensors.py`
+### `infinite_tensor/infinite_tensor.py`
 
 - **InfiniteTensor**: main user-facing class.
   - Shape with `None` for infinite dims, dtype, per-infinite-dim chunk_size.
@@ -21,23 +21,23 @@ An "infinite" tensor is a lazy, windowed view over data with one or more unbound
 - **InfinityTensorTile**: stores tile values: `torch.Tensor` and a processed counter.
 - Validation helpers and custom exceptions.
 
-### `infinite_tensors/tensor_window.py`
+### `infinite_tensor/tensor_window.py`
 
 - **TensorWindow**: sliding-window spec.
   - `window_size`, `window_stride` (default: size), `window_offset`, optional `dimension_map`.
   - Window math: `get_lowest_intersection`, `get_highest_intersection`, `pixel_range_to_window_range`, `get_bounds`, and `map_window_slices`.
   - Used for: determining which windows intersect a pixel region and converting window indices to pixel bounds; mapping between dependent tensors.
 
-### `infinite_tensors/tilestore.py`
+### `infinite_tensor/tilestore.py`
 
 - **TileStore** (ABC): interface for tile backends: `get`/`set`/`delete`/`keys`, processed-window tracking.
 - **MemoryTileStore**: in-RAM dict/set implementation (default). Tracks seen windows to avoid recomputation.
 
-### `infinite_tensors/utils.py`
+### `infinite_tensor/utils.py`
 
 - Indexing utilities: `normalize_slice`, `standardize_indices` for consistent slice handling (ellipsis, negatives, steps, ints→slices) and tracking collapse (squeeze) dims.
 
-### `infinite_tensors/__init__.py`
+### `infinite_tensor/__init__.py`
 
 - Public API re-exports: `InfiniteTensor`, `TensorWindow`, `TileStore`, `MemoryTileStore`, `normalize_slice`, `standardize_indices`.
 
@@ -95,7 +95,7 @@ An "infinite" tensor is a lazy, windowed view over data with one or more unbound
 ## File layout
 
 ```
-infinite_tensors/: core library (infinite_tensors.py, tensor_window.py, tilestore.py, utils.py, __init__.py)
+infinite_tensor/: core library (infinite_tensor.py, tensor_window.py, tilestore.py, utils.py, __init__.py)
 tests/: behavior/specs and fixtures
 examples/: sample usage
 ```t.
