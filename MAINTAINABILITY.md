@@ -64,6 +64,15 @@ An "infinite" tensor is a lazy, windowed view over data with one or more unbound
 - `_is_tile_needed`: computes how many dependent windows overlap a tile (including infinite-dependent-dim cases) and compares to processed count.
 - `mark_for_cleanup()`: immediately deletes tiles that are no longer needed; `_full_cleanup()` clears the store and trims dependency registrations when safe.
 
+- Tile Store:
+  - Stores infinite tensor metadata as dictionary of tensor_id -> tensor. Crucially, stores dependent tensor IDs.
+  - Stores a dictionary of tiles: (tensor_id, tile_index) returns a tile.
+  - Also stores a set of (tensor_id, window_index) keys that store whether a window has already been processed
+
+- When someone wants to know if a certain tile with key (tensor_id, tile_index) may be required we check 2 things:
+  - Is the tile marked for cleanup? If not, we cannot delete the tile as the user may still access it directly.
+  - Otherwise, go through each dependent tensor, find all dependent *windows*, and check if any of those windows is still unprocessed. If any are unprocessed, we cannot delete the tile.
+
 ## Public API surface
 
 - Construct with `InfiniteTensor(shape, f, output_window, args=..., kwargs=..., args_windows=..., kwargs_windows=..., chunk_size=..., dtype=..., tile_store=...)`.

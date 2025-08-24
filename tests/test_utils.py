@@ -4,6 +4,8 @@ import torch
 import numpy as np
 from typing import Tuple, Callable, Optional
 from infinite_tensors.infinite_tensors import InfiniteTensor, TensorWindow
+from infinite_tensors.tilestore import MemoryTileStore
+import uuid
 
 
 def create_test_tensor(
@@ -33,8 +35,8 @@ def create_test_tensor(
         window_kwargs['window_stride'] = window_stride
     
     window = TensorWindow(window_shape, **window_kwargs)
-    
-    return InfiniteTensor(shape, func, window, **kwargs)
+    store = kwargs.pop('tile_store', MemoryTileStore())
+    return store.get_or_create(uuid.uuid4(), shape, func, window, **kwargs)
 
 
 def assert_tensor_properties(
@@ -95,7 +97,8 @@ def create_dependency_chain(
     current = base_tensor
     
     for _ in range(chain_length):
-        current = InfiniteTensor(
+        current = base_tensor._store.get_or_create(
+            uuid.uuid4(),
             current.shape,
             transform_func,
             window,

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import json
 from functools import lru_cache
 import gc
 import logging
@@ -80,6 +81,25 @@ class ValidationError(InfiniteTensorError):
     """Raised when parameter validation fails."""
     pass
 
+
+def _dtype_to_str(dtype: torch.dtype) -> str:
+    """Serialize a torch.dtype to a compact string (e.g., 'float32')."""
+    s = str(dtype)
+    if s.startswith("torch."):
+        return s.split(".")[-1]
+    return s
+
+
+def _str_to_dtype(name: str) -> torch.dtype:
+    """Deserialize a dtype string back to torch.dtype."""
+    dt = getattr(torch, name, None)
+    if dt is None:
+        raise ValueError(f"Unknown torch dtype: {name}")
+    return dt
+
+
+## Removed InfiniteTensorMeta dataclass.
+
 def _validate_shape(shape: tuple) -> None:
     """Validate tensor shape specification."""
     if not isinstance(shape, tuple):
@@ -108,15 +128,10 @@ def _validate_function(f: Callable) -> None:
     if not callable(f):
         raise ValidationError(f"Function must be callable, got {type(f)}")
 
-def _validate_window_args(args: tuple, args_windows, kwargs: dict, kwargs_windows) -> None:
-    """Validate window argument consistency."""
+def _validate_window_args(args: tuple, args_windows) -> None:
+    """Validate window argument consistency for positional args only."""
     if args_windows is not None and len(args_windows) != len(args):
         raise ValidationError(f"args_windows length {len(args_windows)} must match args length {len(args)}")
-    
-    if kwargs_windows is not None:
-        for key in kwargs_windows:
-            if key not in kwargs:
-                raise ValidationError(f"kwargs_windows key '{key}' not found in kwargs")
 
 @dataclass
 class InfinityTensorTile:
@@ -133,20 +148,24 @@ class InfinityTensorTile:
                                     Used for automatic memory management.
     """
     values: torch.Tensor
-    dependency_windows_processed: int = 0
+    processed: bool = False
 
 class InfiniteTensor:
-    def __init__(self, 
+    @classmethod
+    def from_existing(cls, store: TileStore, tensor_id: UUID) -> "InfiniteTensor":
+        """Return the existing tensor instance registered in the store."""
+        return store.get_tensor_meta(tensor_id)
+    def __init__(self,
                  shape: tuple[int|None, ...],
                  f: Callable,
                  output_window: TensorWindow,
                  args: tuple = None,
-                 kwargs: dict = None,
                  args_windows = None,
-                 kwargs_windows = None,
                  chunk_size: Union[int, tuple[int, ...]] = DEFAULT_CHUNK_SIZE,
                  dtype: torch.dtype = DEFAULT_DTYPE,
-                 tile_store: TileStore = None):
+                 tile_store: Optional[TileStore] = None,
+                 uuid: Optional[Any] = None,
+                 _created_via_store: bool = False):
         """Initialize an InfiniteTensor.
 
         An InfiniteTensor represents a theoretically infinite tensor that is processed in chunks.
@@ -154,77 +173,96 @@ class InfiniteTensor:
         the entire tensor into memory.
 
         Args:
+            uuid: Any unique identifier for the tensor. This is used to identify the tensor in the TileStore.
+                  If None, a random UUID will be generated.
+            tile_store: TileStore to use for storing tiles.
             shape: Shape of the tensor. Use None to indicate that the tensor is infinite in that dimension. For example (3, 10, None, None) 
                    indicates a 4-dimensional tensor with the first two dimensions of size 3 and 10, and the last two dimensions being infinite.
                    This might be used to represent a batch of 3 images, with 10 channels and an infinite width and height.
-            f: Callable[[Any, *Any, **Any], torch.Tensor]: A function that takes a context and optional arguments and returns a tensor. 
-               The function signature should be f(ctx, *args, **kwargs), where ctx is the index of the window that is being processed.
-            args: Positional arguments to pass to the function f.
-            kwargs: Keyword arguments to pass to the function f.
-            args_windows: Optional positional arguments specific to window processing.
-            kwargs_windows: Optional keyword arguments specific to window processing.
+            f: Callable[[Any, *Any], torch.Tensor]: A function that takes a context and optional positional arguments and returns a tensor. 
+               The function signature should be f(ctx, *args), where ctx is the index of the window that is being processed.
+            args: Positional arguments to pass to the function f. All must be InfiniteTensor if provided.
+            args_windows: Optional positional argument windows specific to window processing.
             chunk_size: Size of each chunk. Can be an integer for uniform chunk size, or tuple of integers to specify a different chunk size for each dimension.
                         The number of 'None' values in 'shape' must match the number of dimensions in 'chunk_size' if it is a tuple.
             dtype: PyTorch data type for the tensor (default: torch.float32)
-            tile_store: TileStore to use for storing tiles. If None, tiles are stored in memory.
         """
-        # Validate parameters
+        # Enforce creation via store.get_or_create
+        if not _created_via_store:
+            raise ValidationError("InfiniteTensor must be created via TileStore.get_or_create(..)")
+
+        # Validate parameters (will be skipped if reconstructing existing tensor)
         _validate_shape(shape)
         _validate_function(f)
         
         infinite_dims = sum(1 for dim in shape if dim is None)
         _validate_chunk_size(chunk_size, infinite_dims)
-        _validate_window_args(args or (), args_windows, kwargs or {}, kwargs_windows or {})
+        _validate_window_args(args or (), args_windows)
         
-        self._shape = shape
+        # Setup store and ID
+        if tile_store is None:
+            raise ValidationError("A TileStore instance is required")
+        self._store = tile_store
+        self._uuid = uuid.uuid4() if uuid is None else uuid
+
+        # Normalize windows and args
+        normalized_args = list(args or [])
+        normalized_args_windows = list(args_windows) if args_windows is not None else [None] * len(normalized_args)
+        # No kwargs support
+
+        # Compute chunk size tuple across infinite dims
         if isinstance(chunk_size, int):
-            self._chunk_size = (chunk_size,) * infinite_dims
+            chunk_tuple = (chunk_size,) * infinite_dims
         else:
-            self._chunk_size = chunk_size
-        self._dtype = dtype
-        self._uuid = uuid.uuid4()
-        self._operators = []
-        self._store = tile_store or MemoryTileStore()
-        
-        self._dependency_windows = []
-        
-        self._f = f
-        self._args = list(args or [])
-        # Normalize window args before use
-        self._args_windows = list(args_windows) if args_windows is not None else [None] * len(self._args)
-        self._kwargs = kwargs or {}
-        self._kwargs_windows = dict(kwargs_windows) if kwargs_windows is not None else {}
-        for i in range(len(self._args)):
-            if isinstance(self._args[i], InfiniteTensor):
-                assert self._args_windows[i] is not None, f"Argument window must be provided for infinite tensors (arg {i})"
-                dependent_dims = sum(1 for dim in self.shape if dim is None)
-                self._args[i]._dependency_windows.append((self._args_windows[i], dependent_dims))
-            else:
-                assert self._args_windows[i] is None, f"Argument window must not be provided for non-infinite tensors (arg {i})"
-        for kwarg in self._kwargs:
-            if isinstance(self._kwargs[kwarg], InfiniteTensor):
-                assert self._kwargs_windows.get(kwarg) is not None, f"Argument window must be provided for infinite tensors (kwarg {kwarg})"
-                dependent_dims = sum(1 for dim in self.shape if dim is None)
-                self._kwargs[kwarg]._dependency_windows.append((self._kwargs_windows[kwarg], dependent_dims))
-            else:
-                assert self._kwargs_windows.get(kwarg) is None, f"Argument window must not be provided for non-infinite tensors (kwarg {kwarg})"
-        self._output_window = output_window
-        
-        # Calculate tile shape
-        self._tile_shape = []
+            chunk_tuple = chunk_size
+
+        # Compute tile shape
+        tile_shape_list = []
         i = 0
-        for dim in self._shape:
+        for dim in shape:
             if dim is None:
-                self._tile_shape.append(self._chunk_size[i])
+                tile_shape_list.append(chunk_tuple[i])
                 i += 1
             else:
-                self._tile_shape.append(dim)
-        self._tile_shape = tuple(self._tile_shape)
-        _elem_size = torch.empty((), dtype=self._dtype).element_size()
-        self._tile_bytes = int(np.prod(list(self._tile_shape))) * _elem_size
-        
+                tile_shape_list.append(dim)
+        tile_shape = tuple(tile_shape_list)
+        _elem_size = torch.empty((), dtype=dtype).element_size()
+        tile_bytes = int(np.prod(list(tile_shape))) * _elem_size
+
+        # Enforce that all args are InfiniteTensor in the same store, and store only their UUIDs
+        arg_ids = []
+        for i, arg in enumerate(normalized_args):
+            if not isinstance(arg, InfiniteTensor):
+                raise ValidationError("All positional args must be InfiniteTensor instances")
+            if arg._store is not self._store:
+                raise ValidationError("All related tensors must use the same TileStore instance")
+            assert normalized_args_windows[i] is not None, f"Argument window must be provided for infinite tensors (arg {i})"
+            arg_ids.append(arg.uuid)
+
+        # Inline metadata on this instance
+        self._shape = shape
+        self._chunk_size = chunk_tuple
+        self._dtype = dtype
+        self._f = f
+        self._args = arg_ids
+        self._args_windows = normalized_args_windows
+        self._output_window = output_window
+        self._tile_shape = tile_shape
+        self._tile_bytes = tile_bytes
+        self._dependency_windows = []
         self._marked_for_cleanup = False
         self._fully_cleaned = False
+
+        # Register this tensor instance in the store
+        self._store.register_tensor_meta(self._uuid, self.to_json())
+
+        # Attach dependency windows to upstream tensors
+        dependent_dims = sum(1 for dim in shape if dim is None)
+        for i, arg in enumerate(normalized_args):
+            new_list = list(arg.dependency_windows)
+            new_list.append((normalized_args_windows[i], dependent_dims))
+            arg._store.update_tensor_meta(arg._uuid, {'dependency_windows': new_list})
+        # No kwargs dependency registrations
     
     @property
     def shape(self) -> tuple[int|None, ...]:
@@ -233,6 +271,66 @@ class InfiniteTensor:
     @property
     def uuid(self) -> UUID:
         return self._uuid
+
+    def _meta(self) -> "InfiniteTensor":
+        # For backward compatibility in internal methods that expect a meta-like object,
+        # return self, exposing required fields via properties below.
+        return self
+
+    # Expose meta fields as properties for internal access via self._meta()
+    @property
+    def chunk_size(self) -> tuple[int, ...]:
+        return self._chunk_size
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._dtype
+
+    @property
+    def f(self) -> Callable:
+        return self._f
+
+    @property
+    def args(self) -> list:
+        return self._args
+
+    @property
+    def args_windows(self) -> list:
+        return self._args_windows
+
+    @property
+    def output_window(self) -> TensorWindow:
+        return self._output_window
+
+    @property
+    def tile_shape(self) -> tuple[int, ...]:
+        return self._tile_shape
+
+    @property
+    def tile_bytes(self) -> int:
+        return self._tile_bytes
+
+    @property
+    def dependency_windows(self) -> list:
+        return self._dependency_windows
+    
+    @dependency_windows.setter
+    def dependency_windows(self, value: list):
+        self._dependency_windows = value
+
+    @property
+    def marked_for_cleanup(self) -> bool:
+        return self._marked_for_cleanup
+    @marked_for_cleanup.setter
+    def marked_for_cleanup(self, value: bool):
+        self._marked_for_cleanup = bool(value)
+
+    @property
+    def fully_cleaned(self) -> bool:
+        return self._fully_cleaned
+    @fully_cleaned.setter
+    def fully_cleaned(self, value: bool):
+        self._fully_cleaned = bool(value)
 
     def _calculate_indexed_shape(self, indices: tuple[slice, ...]) -> list[int]:
         """Calculate the shape of the result when indexing with given indices.
@@ -247,7 +345,7 @@ class InfiniteTensor:
             List of integers representing the shape of the indexed region
         """
         output_shape = []
-        for idx, shape_dim in zip(indices, self._shape):
+        for idx, shape_dim in zip(indices, self.shape):
             if isinstance(idx, slice):
                 size = (idx.stop - idx.start - 1) // (idx.step or 1) + 1
                 output_shape.append(size)
@@ -272,8 +370,8 @@ class InfiniteTensor:
         """
         expected_shape = self._calculate_indexed_shape(indices)
         expected_output_shape = tuple(s for i, s in enumerate(expected_shape) if i not in collapse_dims)
-        
-        value = torch.as_tensor(value, dtype=self._dtype)
+            
+        value = torch.as_tensor(value, dtype=self.dtype)
         if value.shape != expected_output_shape:
             raise ShapeMismatchError(SHAPE_MISMATCH_ERROR_MSG.format(actual=value.shape, expected=expected_output_shape))
             
@@ -297,7 +395,7 @@ class InfiniteTensor:
         """
         return (self._uuid, tile_index)
 
-    def _pixel_slices_to_tile_ranges(self, slices: tuple[slice, ...]) -> tuple[range, ...]:
+    def _pixel_slices_to_tile_ranges(self, slices: tuple[slice, ...]) -> tuple[slice, ...]:
         """Convert pixel-space slices to tile-space ranges.
         
         Takes pixel coordinates and determines which tiles contain those pixels.
@@ -307,18 +405,20 @@ class InfiniteTensor:
             slices: Tuple of slices in pixel space
             
         Returns:
-            Tuple of ranges indicating which tiles are needed for each infinite dimension
+            Tuple of slices indicating which tiles are needed for each infinite dimension
             
         Example:
             If chunk_size is 512 and we want pixels [100:1500], this returns
-            range(0, 3) since we need tiles 0, 1, and 2 to cover that pixel range.
+            slice(0, 3) since we need tiles 0, 1, and 2 to cover that pixel range.
         """
         tile_ranges = []
         i = 0
         for j, pixel_range in enumerate(slices):
-            if self._shape[j] is None:
-                tile_ranges.append(range(pixel_range.start // self._chunk_size[i],
-                                        (pixel_range.stop - 1) // self._chunk_size[i] + 1))
+            if self.shape[j] is None:
+                start = None if pixel_range.start is None else pixel_range.start // self.chunk_size[i]
+                stop = None if pixel_range.stop is None else (pixel_range.stop - 1) // self.chunk_size[i] + 1
+                
+                tile_ranges.append(slice(start, stop))
                 i += 1
         return tuple(tile_ranges)
         
@@ -345,10 +445,10 @@ class InfiniteTensor:
         infinite_dim = 0
         output = []
         for i, s in enumerate(slices):
-            if self._shape[i] is None:
+            if self.shape[i] is None:
                 # Calculate tile boundaries
-                tile_start = tile_idx[infinite_dim] * self._chunk_size[infinite_dim]
-                tile_end = (tile_idx[infinite_dim] + 1) * self._chunk_size[infinite_dim]
+                tile_start = tile_idx[infinite_dim] * self.chunk_size[infinite_dim]
+                tile_end = (tile_idx[infinite_dim] + 1) * self.chunk_size[infinite_dim]
                 
                 # Adjust start to align with step
                 start = max(s.start, tile_start)
@@ -392,9 +492,9 @@ class InfiniteTensor:
         infinite_dim = 0
         output = []
         for i, s in enumerate(slices):
-            if self._shape[i] is None:
-                output.append(slice(s.start - tile_idx[infinite_dim] * self._chunk_size[infinite_dim],
-                                    s.stop - tile_idx[infinite_dim] * self._chunk_size[infinite_dim],
+            if self.shape[i] is None:
+                output.append(slice(s.start - tile_idx[infinite_dim] * self.chunk_size[infinite_dim],
+                                    s.stop - tile_idx[infinite_dim] * self.chunk_size[infinite_dim],
                                     s.step))
                 infinite_dim += 1
             else:
@@ -424,8 +524,8 @@ class InfiniteTensor:
             # Mix integers and slices
             tensor[0, :, 0:10]
         """
-        indices, collapse_dims = standardize_indices(self._shape, indices)
-        tile_ranges = self._pixel_slices_to_tile_ranges(indices)
+        indices, collapse_dims = standardize_indices(self.shape, indices)
+        tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
         logger.debug(f"Accessing tensor slice with indices: {indices}")
         self._apply_f_range(indices)
@@ -435,9 +535,9 @@ class InfiniteTensor:
         logger.debug(f"Calculated output shape: {output_shape}")
                 
         # Create output tensor
-        output_tensor = torch.empty(output_shape, dtype=self._dtype)
+        output_tensor = torch.empty(output_shape, dtype=self.dtype)
         for tile_index in itertools.product(*tile_ranges):
-            tile = self._store.get(self._get_tile_key(tile_index))
+            tile = self._store.get_tile_for(self._uuid, tile_index)
             if tile is None:
                 raise TileAccessError(TILE_DELETED_ERROR_MSG)
             intersected_indices = self._intersect_slices(indices, tile_index)
@@ -477,11 +577,11 @@ class InfiniteTensor:
             # Mix integers and slices
             tensor[0, :, 0:10] = torch.ones(5, 10)
         """
-        if self._dependency_windows or self._marked_for_cleanup:
+        if self.dependency_windows or self.marked_for_cleanup:
             raise DependencyError(DEPENDENCY_ERROR_MSG)
         
-        indices, collapse_dims = standardize_indices(self._shape, indices)
-        tile_ranges = self._pixel_slices_to_tile_ranges(indices)
+        indices, collapse_dims = standardize_indices(self.shape, indices)
+        tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
         self._apply_f_range(indices)
         
@@ -490,7 +590,7 @@ class InfiniteTensor:
             
         # Set values in tiles
         for tile_index in itertools.product(*tile_ranges):
-            tile = self._store.get(self._get_tile_key(tile_index))
+            tile = self._store.get_tile_for(self._uuid, tile_index)
             if tile is None:
                 raise TileAccessError(TILE_DELETED_ERROR_MSG)
             intersected_indices = self._intersect_slices(indices, tile_index)
@@ -499,7 +599,7 @@ class InfiniteTensor:
                                 for s, n in zip(intersected_indices, indices))
             
             tile.values[tile_space_indices] = value[value_indices]
-            self._store.set(self._get_tile_key(tile_index), tile)
+            self._store.set_tile_for(self._uuid, tile_index, tile)
             
     def _add_op(self, indices: tuple[int|slice, ...], value: torch.Tensor):
         """Optimized addition operation that accumulates values into tiles.
@@ -521,8 +621,8 @@ class InfiniteTensor:
             - Handles device validation (tensors must be on CPU)
             - Does not trigger function application (unlike __getitem__)
         """
-        indices, collapse_dims = standardize_indices(self._shape, indices)
-        tile_ranges = self._pixel_slices_to_tile_ranges(indices)
+        indices, collapse_dims = standardize_indices(self.shape, indices)
+        tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
         #self._apply_f_range(indices)
         
@@ -531,9 +631,9 @@ class InfiniteTensor:
             
         # Set values in tiles
         for tile_index in itertools.product(*tile_ranges):
-            tile = self._store.get(self._get_tile_key(tile_index))
+            tile = self._store.get_tile_for(self._uuid, tile_index)
             if tile is None:
-                tile = InfinityTensorTile(values=torch.zeros(self._tile_shape, dtype=self._dtype))
+                tile = InfinityTensorTile(values=torch.zeros(self.tile_shape, dtype=self.dtype))
             intersected_indices = self._intersect_slices(indices, tile_index)
             tile_space_indices = self._translate_slices(intersected_indices, tile_index)
             value_indices = tuple(slice((s.start - n.start) // s.step, (s.stop - n.start - 1) // s.step + 1)
@@ -543,7 +643,7 @@ class InfiniteTensor:
             if tile.values.device != value.device:
                 raise ValueError(DEVICE_MISMATCH_ERROR_MSG.format(actual=value.device))
             tile.values[tile_space_indices] += value[value_indices]
-            self._store.set(self._get_tile_key(tile_index), tile)
+            self._store.set_tile_for(self._uuid, tile_index, tile)
 
     def _apply_f_range(self, pixel_range: tuple[slice, ...]):
         """Apply the generating function to all windows intersecting a pixel range.
@@ -560,8 +660,8 @@ class InfiniteTensor:
             2. Apply the function to each window that hasn't been processed yet
             3. Function outputs are accumulated into tiles via _add_op
         """
-        lowest_window_indexes = self._output_window.get_lowest_intersection(pixel_range)
-        highest_window_indexes = self._output_window.get_highest_intersection(pixel_range)
+        lowest_window_indexes = self.output_window.get_lowest_intersection(pixel_range)
+        highest_window_indexes = self.output_window.get_highest_intersection(pixel_range)
         for idx in itertools.product(*[range(l, h+1) for l, h in zip(lowest_window_indexes, highest_window_indexes)]):
             self._apply_f(idx)
 
@@ -586,42 +686,35 @@ class InfiniteTensor:
             5. Accumulate result into tiles using _add_op
             6. Mark dependencies as processed for cleanup tracking
         """
-        if self._store.is_window_processed(window_index):
+        if self._store.is_window_processed_for(self._uuid, window_index):
             logger.debug(f"Window {window_index} already processed, skipping")
             return
         
         logger.debug(f"Processing window {window_index}")
-        self._store.mark_window_processed(window_index)
+        self._store.mark_window_processed_for(self._uuid, window_index)
         
+        # Resolve arg IDs to tensors lazily
         args = []
-        for i, arg_window in enumerate(self._args_windows):
+        for i, arg_window in enumerate(self.args_windows):
+            upstream = InfiniteTensor.from_existing(self._store, self.args[i])
             if arg_window is not None:
-                arg_window = self._args_windows[i]
-                args.append(self._args[i][arg_window.get_bounds(window_index)])
+                arg_window = self.args_windows[i]
+                args.append(upstream[arg_window.get_bounds(window_index)])
             else:
-                args.append(self._args[i])
-        kwargs = {}
-        for kwarg in self._kwargs:
-            if self._kwargs_windows[kwarg] is not None:
-                window = self._kwargs_windows[kwarg]
-                kwargs[kwarg] = self._kwargs[kwarg][window.get_bounds(window_index)]
-            else:
-                kwargs[kwarg] = self._kwargs[kwarg]
-        output = self._f(window_index, *args, **kwargs)
+                args.append(upstream)
+        output = self.f(window_index, *args)
         
         # Verify output shape matches the expected window shape
-        expected_shape = self._output_window.window_size
+        expected_shape = self.output_window.window_size
         if tuple(output.shape) != tuple(expected_shape):
             raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
         
-        self._add_op(self._output_window.get_bounds(window_index), output)
+        self._add_op(self.output_window.get_bounds(window_index), output)
         
-        for i, arg in enumerate(self._args):
-            if isinstance(arg, InfiniteTensor):
-                arg._mark_dependency_processed(self._args_windows[i], window_index)
-        for kwarg in self._kwargs:
-            if isinstance(self._kwargs[kwarg], InfiniteTensor):
-                self._kwargs[kwarg]._mark_dependency_processed(self._kwargs_windows[kwarg], window_index)
+        for i, _ in enumerate(self.args):
+            upstream = InfiniteTensor.from_existing(self._store, self.args[i])
+            upstream._mark_dependency_processed(self.args_windows[i], window_index)
+        # No kwargs to mark
 
     def _mark_dependency_processed(self, window, window_index: tuple[int, ...]):
         """Mark a dependency window as processed and handle cleanup.
@@ -640,14 +733,27 @@ class InfiniteTensor:
             3. If tensor is marked for cleanup, delete tiles that are no longer needed
             4. Attempt full cleanup if all dependencies are satisfied
         """
-        tile_ranges = self._pixel_slices_to_tile_ranges(window.get_bounds(window_index))
+        tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(window.get_bounds(window_index))]
         for tile_index in itertools.product(*tile_ranges):
-            tile = self._store.get(self._get_tile_key(tile_index))
-            tile.dependency_windows_processed += 1
-            self._store.set(self._get_tile_key(tile_index), tile)
-            if self._marked_for_cleanup and not self._is_tile_needed(tile_index):
-                self._store.delete(self._get_tile_key(tile_index))
+            if self.marked_for_cleanup and not self._is_tile_needed(tile_index):
+                self._store.delete_tile_for(self._uuid, tile_index)
         self._full_cleanup()
+    
+    def _get_dependent_tiles(self, tile_index: tuple[int, ...]) -> list[tuple[int, ...]]:
+        """Get all tiles that are dependent on a given tile.
+        
+        This is used to determine which tiles need to be processed when a tile is processed.
+        """
+        tile_pixel_slices = self._get_tile_bounds(tile_index)
+        for tensor_id in self._store.get_dependents(self._uuid):
+            tensor = self._store.get_tensor(tensor_id)
+            for arg, arg_window in filter(lambda x: x[0] == self._uuid, zip(tensor.args, tensor.args_windows)):
+                window_slice = arg_window.pixel_range_to_window_range(tile_pixel_slices)
+                dependent_window_slice = arg_window.inverse_map_window_slices(window_slice, len(tensor.shape))
+                dependent_pixel_slice = tensor.output_window.get_bounds(dependent_window_slice)
+                dependent_tile_ranges = [range(s.start, s.stop) for s in tensor._pixel_slices_to_tile_ranges(dependent_pixel_slice)]
+                for dep_tile_index in itertools.product(*dependent_tile_ranges):
+                    yield tensor_id, dep_tile_index
     
     def _is_tile_needed(self, tile_index: tuple[int, ...]) -> bool:
         """Determine if a tile is still needed by dependency tracking.
@@ -664,34 +770,17 @@ class InfiniteTensor:
             
         Internal Logic:
             1. Convert tile bounds to pixel space
-            2. For each dependency window, calculate how many windows overlap this tile
-            3. Handle special case of infinite dependencies (when dependent dimensions
-               exceed mapped dimensions)
-            4. Compare total expected windows to processed windows count
-            5. Return True if any windows are still pending
+            2. For each dependent tensor:
+                - Get all arg_windows that reference this tensor
+                - Find window slice that intersects with the tile
+                - Find all tiles that intersect with that window slice
+                - Check if any of those tiles are not processed
+            3. Return False if all dependents are processed
         """
-        tile_slices = self._get_tile_bounds(tile_index)
-        
-        total_windows = 0
-        for dependency_window, dependent_dims in self._dependency_windows:
-            window_range = dependency_window.pixel_range_to_window_range(tile_slices)
-            if window_range is None:
-                continue
-            
-            # This tile is needed by an infinite number of windows.
-            # This can happen if a dependent tensor dimension is not mapped to any dimension in the current tensor.
-            if dependency_window.dimension_map and dependent_dims > len(set(x for x in dependency_window.dimension_map if x is not None)):
+        for tensor_id, dep_tile_index in self._get_dependent_tiles(tile_index):
+            if not self._store.is_window_processed_for(tensor_id, dep_tile_index):
                 return True
-            
-            num_windows = 1
-            for r in window_range:
-                num_windows *= len(range(r.start, r.stop))
-            total_windows += num_windows
-        
-        tile = self._store.get(self._get_tile_key(tile_index))
-        if tile is None:
-            return False # Already deleted
-        return total_windows != tile.dependency_windows_processed
+        return False
 
     def _get_tile_bounds(self, tile_index: tuple[int, ...]) -> tuple[slice, ...]:
         """Calculate the pixel-space boundaries of a tile.
@@ -711,10 +800,10 @@ class InfiniteTensor:
         """
         tile_slices = []
         infinite_dim = 0
-        for i, dim in enumerate(self._shape):
+        for i, dim in enumerate(self.shape):
             if dim is None:
-                start = tile_index[infinite_dim] * self._chunk_size[infinite_dim]
-                stop = (tile_index[infinite_dim] + 1) * self._chunk_size[infinite_dim]
+                start = tile_index[infinite_dim] * self.chunk_size[infinite_dim]
+                stop = (tile_index[infinite_dim] + 1) * self.chunk_size[infinite_dim]
                 tile_slices.append(slice(start, stop))
                 infinite_dim += 1
             else:
@@ -729,7 +818,10 @@ class InfiniteTensor:
         return False  # Don't suppress any exceptions
 
     def __del__(self):
-        self.mark_for_cleanup()
+        try:
+            self.mark_for_cleanup()
+        except Exception:
+            pass
                 
     def mark_for_cleanup(self):
         """Mark this tensor for cleanup and begin aggressive memory management.
@@ -743,12 +835,12 @@ class InfiniteTensor:
             2. Immediately delete any tiles that have no pending dependencies
             3. Trigger full cleanup if possible
         """
-        if not self._marked_for_cleanup:
-            for uuid, tile_index in self._store.keys():
+        if not self.marked_for_cleanup:
+            # Delete tiles that are no longer needed
+            for tile_index in list(self._store.iter_tile_keys_for(self._uuid)):
                 if not self._is_tile_needed(tile_index):
-                    self._store.delete(self._get_tile_key(tile_index))
+                    self._store.delete_tile_for(self._uuid, tile_index)
             self._full_cleanup()
-            self._marked_for_cleanup = True
             
     def _full_cleanup(self):
         """Perform complete cleanup when tensor is no longer needed.
@@ -764,19 +856,33 @@ class InfiniteTensor:
             - Recursively trigger cleanup in dependency tensors
             - Mark tensor as fully cleaned to prevent duplicate cleanup
         """
-        if self._marked_for_cleanup and len(self._store.keys()) == 0 and len(self._dependency_windows) == 0 and not self._fully_cleaned:
-            self._fully_cleaned = True
-            self._store.clear()
-            for arg, arg_window in zip(self._args, self._args_windows):
-                if isinstance(arg, InfiniteTensor):
-                    dependent_dims = sum(1 for dim in self.shape if dim is None)
-                    arg._dependency_windows.remove((arg_window, dependent_dims))
-                    arg._full_cleanup()
-            for kwarg in self._kwargs:
-                arg = self._kwargs[kwarg]
-                if isinstance(arg, InfiniteTensor):
-                    window = self._kwargs_windows[kwarg]
-                    dependent_dims = sum(1 for dim in self.shape if dim is None)
-                    arg._dependency_windows.remove((window, dependent_dims))
-                    arg._full_cleanup()
+        if self.marked_for_cleanup and (next(self._store.iter_tile_keys_for(self._uuid), None) is None) and len(self.dependency_windows) == 0 and not self.fully_cleaned:
+            # Mark cleaned and remove references from upstream tensors
+            self._store.update_tensor_meta(self._uuid, {'fully_cleaned': True})
+            # Remove this tensor's dependency registrations from its args
+            dependent_dims = sum(1 for dim in self.shape if dim is None)
+            for arg_id, arg_window in zip(self.args, self.args_windows):
+                upstream_tensor = InfiniteTensor.from_existing(self._store, arg_id)
+                updated = [dw for dw in upstream_tensor.dependency_windows if dw != (arg_window, dependent_dims)]
+                upstream_tensor._store.update_tensor_meta(upstream_tensor._uuid, {'dependency_windows': updated})
+                upstream_tensor._full_cleanup()
+            # No kwargs cleanup
+            # Finally clear this tensor's state from the store
+            self._store.clear_tensor(self._uuid)
+
+    def to_json(self) -> dict:
+        """Serialize this tensor's metadata to JSON."""
+        def window_to_dict(w: Optional[TensorWindow]):
+            return None if w is None else w.to_dict()
+
+        return {
+            'shape': list(self.shape),
+            'chunk_size': list(self.chunk_size),
+            'dtype': _dtype_to_str(self.dtype),
+            'args': [str(a) for a in self.args],
+            'args_windows': [window_to_dict(w) for w in self.args_windows],
+            'output_window': self.output_window.to_dict(),
+            'tile_shape': list(self.tile_shape),
+            'tile_bytes': int(self.tile_bytes)
+        }
         

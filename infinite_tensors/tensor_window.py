@@ -70,6 +70,24 @@ class TensorWindow:
     @property
     def uuid(self) -> UUID:
         return self._uuid
+
+    # --- Serialization helpers ---
+    def to_dict(self) -> dict:
+        return {
+            'window_size': list(self.window_size),
+            'window_stride': list(self.window_stride),
+            'window_offset': list(self.window_offset),
+            'dimension_map': list(self.dimension_map) if self.dimension_map is not None else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TensorWindow":
+        return cls(
+            window_size=tuple(int(x) for x in data['window_size']),
+            window_stride=tuple(int(x) for x in data['window_stride']) if data.get('window_stride') is not None else None,
+            window_offset=tuple(int(x) for x in data['window_offset']) if data.get('window_offset') is not None else None,
+            dimension_map=tuple(None if x is None else int(x) for x in data['dimension_map']) if data.get('dimension_map') is not None else None,
+        )
     
     def map_window_slices(self, input_slices: tuple[slice, ...]) -> tuple[slice, ...]:
         """Apply dimension mapping to transform input slices to output slices.
@@ -100,6 +118,37 @@ class TensorWindow:
                 output_slices.append(input_slices[dim_idx])
         
         return tuple(output_slices)
+    
+    def inverse_map_window_slices(self, output_slices: tuple[slice, ...], input_dims: int) -> tuple[slice, ...]:
+        """Apply inverse dimension mapping to transform output slices to input slices.
+        
+        This reverses the transformation done by map_window_slices, converting slices
+        from the output tensor's dimension order back to the input tensor's order.
+        Useful for backpropagation or when you need to map results back to inputs.
+        
+        Args:
+            output_slices: Window slices in the output tensor's dimension order
+            
+        Returns:
+            Window slices reordered to match the input tensor's dimensions.
+            Dimensions that were mapped from None (singleton dims) are omitted.
+            Unknown slices are filled with slice(0, 1).
+            
+        Example:
+            If dimension_map=(1, 0) and output_slices=(slice(5,15), slice(0,10)),
+            returns (slice(0,10), slice(5,15)) - dimensions are swapped back.
+        """
+        if self.dimension_map is None:
+            return output_slices
+            
+        # Count non-None entries to determine input dimension count
+        input_slices = [slice(None, None)] * input_dims
+        
+        for output_idx, input_idx in enumerate(self.dimension_map):
+            if input_idx is not None:
+                input_slices[input_idx] = output_slices[output_idx]
+        
+        return tuple(input_slices)
         
     def get_lowest_intersection(self, point: tuple[int|slice, ...]) -> tuple[int, ...]:
         """Find the lowest-indexed window that intersects with a given point/region.
@@ -232,8 +281,12 @@ class TensorWindow:
         bounds = []
         for i, (stride, size, offset) in enumerate(zip(self.window_stride, self.window_size, self.window_offset)):
             w = window_slices[i]
-            # Convert window coordinates to pixel coordinates
-            # Start: window_index * stride + offset
-            # End: last_window_index * stride + offset + size 
-            bounds.append(slice(w.start * stride + offset, (w.stop - 1) * stride + size + offset))
+            start = None if w.start is None else w.start * stride + offset
+            stop = None if w.stop is None else (w.stop - 1) * stride + size + offset
+            bounds.append(slice(start, stop))
         return tuple(bounds)
+
+    # Keep repr readable for debugging/JSON dumps that might include windows
+    def __repr__(self) -> str:
+        return (f"TensorWindow(size={self.window_size}, stride={self.window_stride}, "
+                f"offset={self.window_offset}, map={self.dimension_map})")
