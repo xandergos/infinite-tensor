@@ -10,11 +10,9 @@ The abstract TileStore interface allows for different storage strategies:
 """
 
 import abc
-import os
-import h5py
+import uuid
 import numpy as np
 from typing import List, Optional, Dict, Any, Tuple, Iterable, Set
-from uuid import UUID
 
 class TileStore(abc.ABC):
     """Abstract base class for tile storage backends.
@@ -26,38 +24,38 @@ class TileStore(abc.ABC):
     The tile store tracks per-tensor window processing state to prevent
     duplicate computation and enable efficient memory management.
     """
-    def register_tensor_meta(self, tensor_id: UUID, meta: dict) -> None:
+    def register_tensor_meta(self, tensor_id: str, meta: dict) -> None:
         """Register a new tensor and its metadata in the store."""
         raise NotImplementedError
 
-    def get_tensor_meta(self, tensor_id: UUID) -> dict:
+    def get_tensor_meta(self, tensor_id: str) -> dict:
         """Fetch metadata dict for a tensor."""
         raise NotImplementedError
     
-    def get_dependents(self, tensor_id: UUID) -> List[UUID]:
+    def get_dependents(self, tensor_id: str) -> List[str]:
         """Fetch the dependents of a tensor."""
         raise NotImplementedError
 
-    def clear_tensor(self, tensor_id: UUID) -> None:
+    def clear_tensor(self, tensor_id: str) -> None:
         """Remove all state for a tensor (tiles, windows, metadata)."""
         raise NotImplementedError
 
     # Tile operations scoped to a tensor
-    def get_tile_for(self, tensor_id: UUID, tile_index: tuple[int, ...]):
+    def get_tile_for(self, tensor_id: str, tile_index: tuple[int, ...]):
         raise NotImplementedError
 
-    def set_tile_for(self, tensor_id: UUID, tile_index: tuple[int, ...], value) -> None:
+    def set_tile_for(self, tensor_id: str, tile_index: tuple[int, ...], value) -> None:
         raise NotImplementedError
 
-    def delete_tile_for(self, tensor_id: UUID, tile_index: tuple[int, ...]) -> None:
+    def delete_tile_for(self, tensor_id: str, tile_index: tuple[int, ...]) -> None:
         raise NotImplementedError
 
-    def iter_tile_keys_for(self, tensor_id: UUID) -> Iterable[tuple[int, ...]]:
+    def iter_tile_keys_for(self, tensor_id: str) -> Iterable[tuple[int, ...]]:
         raise NotImplementedError
 
     @abc.abstractmethod
     def get_or_create(self,
-                      tensor_id: UUID,
+                      tensor_id,
                       shape: tuple[int|None, ...],
                       f,
                       output_window,
@@ -68,7 +66,7 @@ class TileStore(abc.ABC):
         """Create or return an InfiniteTensor bound to this store."""
         raise NotImplementedError
     
-    def get_tensor(self, tensor_id: UUID):
+    def get_tensor(self, tensor_id: str):
         """Get a tensor by it's ID. Raises a KeyError if the tensor is not found."""
         raise NotImplementedError
 
@@ -84,13 +82,13 @@ class MemoryTileStore(TileStore):
         """Initialize an empty in-memory tile store."""
         super().__init__()
         self._tile_store: Dict[tuple, Any] = {}
-        self._tensor_store: Dict[UUID, Any] = {}
+        self._tensor_store: Dict[str, Any] = {}
         self._dependents = {}
-        self._tensor_meta: Dict[UUID, Any] = {}
-        self._processed_windows_by_tensor: Dict[UUID, Set[Tuple[int, ...]]] = {}
+        self._tensor_meta: Dict[str, Any] = {}
+        self._processed_windows_by_tensor: Dict[str, Set[Tuple[int, ...]]] = {}
 
     # New per-tensor APIs
-    def register_tensor_meta(self, tensor_id: UUID, meta: dict) -> None:
+    def register_tensor_meta(self, tensor_id: str, meta: dict) -> None:
         self._tensor_meta[tensor_id] = meta
         self._processed_windows_by_tensor[tensor_id] = set()
         
@@ -101,13 +99,13 @@ class MemoryTileStore(TileStore):
                 self._dependents[dependency] = []
             self._dependents[dependency].append(tensor_id)
 
-    def get_tensor_meta(self, tensor_id: UUID) -> dict:
+    def get_tensor_meta(self, tensor_id: str) -> dict:
         return self._tensor_meta[tensor_id]
     
-    def get_dependents(self, tensor_id: UUID) -> List[UUID]:
-        return self._dependents[tensor_id]
+    def get_dependents(self, tensor_id: str) -> List[str]:
+        return self._dependents.get(tensor_id, [])
 
-    def clear_tensor(self, tensor_id: UUID) -> None:
+    def clear_tensor(self, tensor_id: str) -> None:
         # Remove tiles
         for tile_idx in list(self.iter_tile_keys_for(tensor_id)):
             self.delete_tile_for(tensor_id, tile_idx)
@@ -118,30 +116,30 @@ class MemoryTileStore(TileStore):
         if tensor_id in self._tensor_meta:
             del self._tensor_meta[tensor_id]
 
-    def get_tile_for(self, tensor_id: UUID, tile_index: tuple[int, ...]):
+    def get_tile_for(self, tensor_id: str, tile_index: tuple[int, ...]):
         return self._tile_store.get((tensor_id, tile_index))
 
-    def set_tile_for(self, tensor_id: UUID, tile_index: tuple[int, ...], value) -> None:
+    def set_tile_for(self, tensor_id: str, tile_index: tuple[int, ...], value) -> None:
         self._tile_store[(tensor_id, tile_index)] = value
 
-    def delete_tile_for(self, tensor_id: UUID, tile_index: tuple[int, ...]) -> None:
+    def delete_tile_for(self, tensor_id: str, tile_index: tuple[int, ...]) -> None:
         key = (tensor_id, tile_index)
         if key in self._tile_store:
             del self._tile_store[key]
 
-    def iter_tile_keys_for(self, tensor_id: UUID) -> Iterable[tuple[int, ...]]:
+    def iter_tile_keys_for(self, tensor_id: str) -> Iterable[tuple[int, ...]]:
         for key in self._tile_store.keys():
             if isinstance(key, tuple) and len(key) == 2 and key[0] == tensor_id:
                 yield key[1]
 
-    def is_window_processed_for(self, tensor_id: UUID, window_index: tuple[int, ...]) -> bool:
+    def is_window_processed_for(self, tensor_id: str, window_index: tuple[int, ...]) -> bool:
         return window_index in self._processed_windows_by_tensor.get(tensor_id, set())
 
-    def mark_window_processed_for(self, tensor_id: UUID, window_index: tuple[int, ...]) -> None:
+    def mark_window_processed_for(self, tensor_id: str, window_index: tuple[int, ...]) -> None:
         self._processed_windows_by_tensor.setdefault(tensor_id, set()).add(window_index)
 
     def get_or_create(self,
-                      tensor_id: UUID,
+                      tensor_id,
                       shape: tuple[int|None, ...],
                       f,
                       output_window,
@@ -151,8 +149,15 @@ class MemoryTileStore(TileStore):
                       dtype=None):
         # Local import to avoid circular dependency
         from infinite_tensors.infinite_tensors import InfiniteTensor, DEFAULT_DTYPE
-        if tensor_id in self._tensor_meta:
-            return InfiniteTensor.from_existing(self, tensor_id)
+        # Normalize tensor_id to str, generate if missing
+        try:
+            # Fast path when a UUID object is passed
+            tid_str = str(tensor_id) if tensor_id is not None else str(uuid.uuid4())
+        except Exception:
+            tid_str = str(uuid.uuid4())
+
+        if tid_str in self._tensor_meta:
+            return InfiniteTensor.from_existing(self, tid_str)
         tensor = InfiniteTensor(
             shape,
             f,
@@ -162,14 +167,15 @@ class MemoryTileStore(TileStore):
             chunk_size=chunk_size,
             dtype=(dtype or DEFAULT_DTYPE),
             tile_store=self,
-            uuid=tensor_id,
+            tensor_id=tid_str,
             _created_via_store=True,
         )
-        self._tensor_store[tensor_id] = tensor
+        self._tensor_store[tid_str] = tensor
         return tensor
 
     def get_tensor(self, tensor_id: Any):
-        if tensor_id not in self._tensor_store:
-            raise KeyError(f"Tensor {tensor_id} not found")
-        return self._tensor_store[tensor_id]
+        tid_str = str(tensor_id)
+        if tid_str not in self._tensor_store:
+            raise KeyError(f"Tensor {tid_str} not found")
+        return self._tensor_store[tid_str]
 
