@@ -1,25 +1,14 @@
-from dataclasses import dataclass, field
-import json
-from functools import lru_cache
-import gc
+from dataclasses import dataclass
 import logging
-import math
-import os
-import random
-import tempfile
-import time
 from typing import Any, Callable, Optional, Union
-import weakref
 import numpy as np
 import torch
-import h5py
-from collections import OrderedDict
 import itertools
 import uuid
 
 from infinite_tensor.tensor_window import TensorWindow
-from infinite_tensor.tilestore import MemoryTileStore, TileStore
-from infinite_tensor.utils import normalize_slice, standardize_indices
+from infinite_tensor.tilestore import TileStore
+from infinite_tensor.utils import standardize_indices
 
 # COORDINATE SYSTEM DEFINITIONS:
 # pixel space - Pixel space with all dimensions included (raw tensor coordinates)

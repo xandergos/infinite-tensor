@@ -1,28 +1,35 @@
 [build-system]
-requires = ["setuptools>=61.0", "torch"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "infinite-tensor"
-version = "1.0.0"
-authors = [
-  { name="Alexander Goslin", email="thegosalexander@gmail.com" },
-]
+version = "0.1.0"
 description = "A Python library for performing operations on tensors with infinite dimensions."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
+authors = [
+  { name = "Alexander Goslin", email = "alexander.goslin@gmail.com" },
+]
+license = { text = "MIT" }
+keywords = ["pytorch", "tensor", "infinite"]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "numpy>=1.21.0",
+  "torch>=2.0.0"
 ]
 
 [project.urls]
-Homepage = "https://github.com/xandergoslin/infinite-tensor"
-Issues = "https://github.com/xandergoslin/infinite-tensor/issues"
+Homepage = "https://github.com/xandergos/infinite-tensor"
+Issues = "https://github.com/xandergos/infinite-tensor/issues"
 
-[tool.pytest.ini_options]
-addopts = [
-    "--import-mode=importlib",
-]
-pythonpath = "."
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["infinite_tensor*"]
+exclude = ["tests*", "docs*", "examples*"]

@@ -3,7 +3,7 @@
 import pytest
 import torch
 import numpy as np
-from infinite_tensor.infinite_tensor import InfiniteTensor, TensorWindow
+from infinite_tensor import TensorWindow
 from infinite_tensor.tilestore import MemoryTileStore
 import uuid
 
@@ -289,7 +289,7 @@ class TestInfiniteTensorIntegration:
 
 
 if __name__ == "__main__":
-    # Allow running tests directly with python
+    # Allow running tests directly with python (basic smoke tests)
     TestInfiniteTensorMemoryManagement().test_pyramid_cleanup(MemoryTileStore())
     TestInfiniteTensorMemoryManagement().test_pyramid_cleanup_2(MemoryTileStore())
     
