@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "infinite-tensor"
-version = "0.0.1"
+version = "1.0.0"
 authors = [
-  { name="Alexander Goslin", email="alexander.goslin@gmail.com" },
+  { name="Alexander Goslin", email="thegosalexander@gmail.com" },
 ]
 description = "A Python library for performing operations on tensors with infinite dimensions."
 readme = "README.md"

@@ -9,145 +9,201 @@ Install using pip:
 pip install git+https://github.com/xandergos/infinite-tensor.git
 ```
 
-## Basic Usage
+## What is an Infinite Tensor?
 
-### Creating an Infinite Tensor
+An Infinite Tensor is a powerful tool that lets you work with data that has one or more unbounded (infinite) dimensions. Instead of loading all data into memory at once, it:
+- Loads only the parts you need, when you need them
+- Processes data in manageable chunks (windows)
+- Automatically manages memory by cleaning up unused data
 
-An infinite tensor is created by specifying:
+Think of it like a smart window that slides over your data, processing only what's visible through that window at any time.
 
-*   Shape (using `None` for infinite dimensions)
-*   Function that generates the tensor data in windows
-*   The window configuration for processing (shape, stride, offset)
+## Key Concepts
 
-### Creating Dependent Tensors
+### Windows and Chunks
 
-You can create new tensors that depend on existing ones. The library handles dependencies and memory management automatically: When a tile of a tensor is not needed anymore, it is automatically deleted. To indicate that a tensor is no longer needed by anything but another infinite tensors, you can call tensor.mark_for_cleanup().
-When a tile is no longer needed by any infinite tensors, it is automatically deleted to save memory.
+1. **Windows**: Define how your processing function sees the data
+   - Fixed size (e.g., 64x64 pixels for image processing)
+   - Can overlap if needed
+   - Your function processes one window at a time
 
-**Important:** You cannot set values on infinite tensors with dependencies. This is because the tensor's state may be inconsistent. Please set values before creating any dependent tensors.
+2. **Chunks**: How data is stored internally
+   - Larger blocks that contain processed results
+   - Automatically managed for memory efficiency
+   - You don't need to interact with these directly
+
+## Getting Started
+
+### 1. Creating an Infinite Tensor
+
+Always create tensors through a `TileStore`:
+
+```python
+import uuid
+import torch
+from infinite_tensor import TensorWindow, MemoryTileStore
+
+# Create a tile store (in-memory)
+tile_store = MemoryTileStore()
+
+# Define how each window is generated; must match the window's shape
+def your_processing_function(ctx):
+    # ctx is the window index (e.g., (wy, wx) for 2D)
+    return torch.ones(512, 512)
+
+# Define the output window seen by your function
+window = TensorWindow((512, 512))
+
+# Create an infinite tensor (2D infinite)
+tensor = tile_store.get_or_create(
+    uuid.uuid4(),
+    shape=(None, None),      # None means infinite dimension
+    f=your_processing_function,
+    output_window=window,
+    chunk_size=512,          # internal tile size (optional)
+)
+```
+
+### 2. Using the Tensor
+
+```python
+# Slice it like a normal tensor (computed on-demand)
+result = tensor[0:1024, 0:1024]
+
+# Optional: use a context manager to trigger cleanup when done
+with tile_store.get_or_create(uuid.uuid4(), (None, None), your_processing_function, window) as t:
+    part = t[10:100, 20:200]
+```
+
+## Advanced Features
+
+### 1. Dependency Chaining
+
+Create processing pipelines by making one infinite tensor depend on another.
+
+Automatic windowing via `args` and `args_windows`
+
+```python
+import uuid
+import torch
+from infinite_tensor import TensorWindow, MemoryTileStore
+
+tile_store = MemoryTileStore()
+
+def zeros_tensor_func(ctx):
+    return torch.zeros(10, 512, 512)  # (C, H, W)
+
+base_window = TensorWindow((10, 512, 512))
+base = tile_store.get_or_create(uuid.uuid4(), (10, None, None), zeros_tensor_func, base_window)
+
+# Define an offset window for the dependent tensor
+offset_window = TensorWindow((10, 512, 512), offset=(0, -256, -256))
+
+# The function receives the upstream window directly (already sliced)
+def inc_func(ctx, prev):
+    return prev + 1
+
+dep = tile_store.get_or_create(
+    uuid.uuid4(),
+    (10, None, None),
+    inc_func,
+    offset_window,
+    args=(base,),
+    args_windows=(offset_window,),
+)
+
+out = dep[:, 0:512, 0:512]  # ones
+```
+
+Note: Do not manually slice dependencies (e.g., using `TensorWindow.get_bounds`). Always pass upstream tensors via `args` with matching `args_windows`. Manual slicing is not recommended and can break dependency tracking and memory management.
+
+### 2. Memory Management
+
+- Memory is automatically managed and cached tiles are reused
+- Use context managers for scoped cleanup
+- Call `tensor.mark_for_cleanup()` when you know a tensor is no longer needed
+
+```python
+tensor.mark_for_cleanup()
+```
+
+## Important Notes
+
+1. **Create via TileStore**: Construct tensors with `tile_store.get_or_create(...)`. Direct construction of `InfiniteTensor` is not supported.
+2. **Avoid manual slicing**: Do not manually slice dependencies. Use `args`/`args_windows` so the framework manages slicing and dependencies.
+3. **CPU Only**: All processing happens on CPU. GPU tensors will raise errors.
+4. **Window Size**: Your function must return exactly the size specified in `TensorWindow`.
+5. **Finite Dimensions**: Non-infinite dimensions must fit in memory.
+
+## Common Patterns
+
+1. **Image Processing**:
+```python
+import uuid
+import torch
+from infinite_tensor import TensorWindow, MemoryTileStore
+
+tile_store = MemoryTileStore()
+
+def process_image(ctx):
+    # return HxWxC window; adjust as needed
+    return torch.randn(64, 64, 3)
+
+image_window = TensorWindow((64, 64, 3))
+image_tensor = tile_store.get_or_create(
+    uuid.uuid4(),
+    shape=(None, None, 3),
+    f=process_image,
+    output_window=image_window,
+)
+region = image_tensor[0:512, 0:512, :]
+```
+
+2. **Data Streaming**:
+```python
+import uuid
+import torch
+from infinite_tensor import TensorWindow, MemoryTileStore
+
+tile_store = MemoryTileStore()
+feature_size = 128
+
+def process_stream(ctx):
+    return torch.randn(1000, feature_size)
+
+stream_window = TensorWindow((1000, feature_size))
+stream_tensor = tile_store.get_or_create(
+    uuid.uuid4(),
+    shape=(None, feature_size),
+    f=process_stream,
+    output_window=stream_window,
+)
+batch = stream_tensor[0:5000, :]
+```
+
+## Troubleshooting
+
+Common issues and solutions:
+
+1. **Memory Issues**:
+   - Reduce window size
+   - Reduce chunk size
+   - Use context managers or `.mark_for_cleanup()` for cleanup
+
+2. **Shape Mismatches**:
+   - Ensure your function returns exactly the window size
+   - Check that window sizes match between dependent tensors
+
+3. **Performance**:
+   - Adjust chunk size to balance memory use and processing overhead
+   - Consider window overlap requirements carefully
 
 ## Examples
 
-### Clamping random numbers
-```python
-def random_generator(ctx):
-    # Generate a random 100x100x3 tensor with values between 0 and 1
-    return torch.rand((3, 100, 100))
-
-def clamp_values(ctx, input_tensor):
-    # Clamp each value to be between 0.25 and 0.75
-    return torch.clamp(input_tensor, 0.25, 0.75)
-
-# Create base random tensor
-base_tensor = InfiniteTensor(
-    shape=(3, None, None),  # 3 channels, infinite height and width
-    f=random_generator,
-    output_window=TensorWindow((3, 100, 100))
-)
-
-# Create doubled tensor
-doubled_tensor = InfiniteTensor(
-    shape=(3, None, None),
-    f=clamp_values,
-    output_window=TensorWindow((3, 100, 100)),
-    args=(base_tensor,),
-    args_windows=[TensorWindow((3, 100, 100))]  # Input window same as output
-)
-
-# Visualize the results
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
-
-ax1.imshow(base_tensor[:, :100, :100].permute(1, 2, 0).numpy(), vmin=0, vmax=1)
-ax1.set_title('Original Random Values (0-1)')
-
-ax2.imshow(doubled_tensor[:, :100, :100].permute(1, 2, 0).numpy(), vmin=0, vmax=1)
-ax2.set_title('Clamped Values (0.25-0.75)')
-
-plt.show()
-```
-
-
-### Seamless, infinite gaussian blur
-```python
-from infinite_tensors.infinite_tensors import *
-import matplotlib.pyplot as plt
-import torchvision.transforms.v2.functional as F
-
-def base_generator(ctx):
-    return torch.rand((3, 512, 512))
-
-def gaussian_blur(ctx, input_tensor):
-    kernel_size = 5
-    padding = kernel_size // 2
-    
-    # Apply blur only to valid region
-    blurred = F.gaussian_blur(
-        input_tensor,
-        kernel_size=kernel_size,
-        sigma=1.0
-    )
-    
-    # Calculate valid region (exclude padding that would depend on missing data)
-    blurred = blurred[
-        :,  # Keep all channels
-        padding:-padding if padding > 0 else None,  # Trim vertical padding
-        padding:-padding if padding > 0 else None   # Trim horizontal padding
-    ]
-    
-    return blurred
-
-# Usage with adjusted window sizes to account for padding
-kernel_size = 5
-padding = kernel_size // 2
-input_window_size = 512 + padding * 2  # Increase window size to account for padding
-
-tensor = InfiniteTensor(
-    shape=(3, None, None),
-    f=base_generator,
-    output_window=TensorWindow((3, 512, 512))
-)
-
-blurred = InfiniteTensor(
-    shape=(3, None, None),
-    f=gaussian_blur,
-    output_window=TensorWindow((3, 512, 512)),  # Original size without padding
-    args=(tensor,),
-    args_windows=[TensorWindow((3, input_window_size, input_window_size), (3, 512, 512), (0, -padding, -padding))]  # Padded input window
-)
-
-double_blurred = InfiniteTensor(
-    shape=(3, None, None),
-    f=gaussian_blur, 
-    output_window=TensorWindow((3, 512, 512)),
-    args=(blurred,),
-    args_windows=[TensorWindow((3, input_window_size, input_window_size), (3, 512, 512), (0, -padding, -padding))]
-)
-
-
-fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-
-axs[0].imshow(tensor[:, 500:524, 500:524].permute(1, 2, 0).numpy())
-axs[0].set_title('Original')
-
-axs[1].imshow(blurred[:, 500:524, 500:524].permute(1, 2, 0).numpy())
-axs[1].set_title('Blurred')
-
-axs[2].imshow(double_blurred[:, 500:524, 500:524].permute(1, 2, 0).numpy())
-axs[2].set_title('Double Blurred')
-
-plt.show()
-```
-
-## Implementation Details
-
-The library works by:
-
-*   Dividing infinite dimensions into chunks (tiles)
-*   Processing data in windows using the provided function
-*   Managing dependencies between tensors
-*   Automatically cleaning up unused tiles to conserve memory
-
-For the full implementation details, see the source code.
+Check out `examples/blur.py` for a complete example showing how to:
+- Process images larger than memory
+- Handle boundaries correctly
+- Chain multiple processing steps
 
 ## License
 
