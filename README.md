@@ -14,7 +14,6 @@ pip install git+https://github.com/xandergos/infinite-tensor.git
 An Infinite Tensor is a powerful tool that lets you work with data that has one or more unbounded (infinite) dimensions. Instead of loading all data into memory at once, it:
 - Loads only the parts you need, when you need them
 - Processes data in manageable chunks (windows)
-- Automatically manages memory by cleaning up unused data
 
 Think of it like a smart window that slides over your data, processing only what's visible through that window at any time.
 
