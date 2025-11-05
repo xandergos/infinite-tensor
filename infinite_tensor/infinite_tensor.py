@@ -172,9 +172,20 @@ class InfinityTensorTile:
 
 class InfiniteTensor:
     @classmethod
-    def from_existing(cls, store: TileStore, tensor_id: str) -> "InfiniteTensor":
-        """Return the existing tensor instance registered in the store."""
-        return store.get_tensor_meta(tensor_id)
+    def from_existing(cls, store: TileStore, tensor_id: str, f: Optional[Callable] = None) -> "InfiniteTensor":
+        """Return the existing tensor instance registered in the store.
+        
+        Args:
+            store: TileStore containing the tensor
+            tensor_id: Unique identifier for the tensor
+            f: Optional computation function. Required if tensor is not in cache
+               and needs to be reconstructed from metadata.
+               
+        Returns:
+            InfiniteTensor instance
+        """
+        return store.get_tensor(tensor_id, f=f)
+    
     def __init__(self,
                  shape: tuple[int|None, ...],
                  f: Callable,
@@ -641,8 +652,6 @@ class InfiniteTensor:
         indices, collapse_dims = standardize_indices(self.shape, indices)
         tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
-        #self._apply_f_range(indices)
-        
         # Validate and prepare value
         value = self._validate_and_prepare_value(indices, value, collapse_dims)
             
@@ -722,7 +731,8 @@ class InfiniteTensor:
             upstream = self._store.get_tensor(self.args[i])
             arg_window = self.args_windows[i]
             args.append(upstream[arg_window.get_bounds(window_index)])
-        output = self.f(window_index, *args)
+        with torch.no_grad():
+            output = self.f(window_index, *args)
         
         # Verify output shape matches the expected window shape
         expected_shape = self.output_window.size

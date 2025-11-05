@@ -23,6 +23,9 @@ dependencies = [
   "torch>=2.0.0"
 ]
 
+[project.optional-dependencies]
+hdf5 = ["h5py>=3.0.0"]
+
 [project.urls]
 Homepage = "https://github.com/xandergos/infinite-tensor"
 Issues = "https://github.com/xandergos/infinite-tensor/issues"

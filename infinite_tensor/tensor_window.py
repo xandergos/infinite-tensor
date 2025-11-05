@@ -59,7 +59,6 @@ class TensorWindow:
         self.stride = stride or size
         self.offset = offset or (0,) * len(size)
         self.dimension_map = dimension_map
-        self._uuid = uuid.uuid4()
         
         # Verify all window parameters have same length
         if len(self.stride) != len(self.size):
@@ -68,10 +67,6 @@ class TensorWindow:
             raise ValueError(f"offset length ({len(self.offset)}) must match size length ({len(self.size)})")
         if self.dimension_map is not None and len(self.dimension_map) != len(self.size):
             raise ValueError(f"dimension_map length ({len(self.dimension_map)}) must match size length ({len(self.size)})")
-        
-    @property
-    def uuid(self) -> UUID:
-        return self._uuid
 
     # --- Serialization helpers ---
     def to_dict(self) -> dict:

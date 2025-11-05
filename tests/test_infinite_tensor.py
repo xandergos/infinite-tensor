@@ -242,6 +242,129 @@ class TestInfiniteTensorMemoryManagement:
         assert len(zero_tiles) == 5 * 5 - 1
 
 
+class TestInfiniteTensorTileCleanup:
+    """Extended cleanup regression tests for complex dependency chains."""
+
+    def test_cleanup_multi_input_dependency_chain(self, tile_store):
+        """Ensure base tiles release when chained dependencies are marked for cleanup."""
+
+        window = TensorWindow((10, 512, 512))
+
+        def zeros_chunk(_):
+            return torch.zeros((10, 512, 512))
+
+        def ones_chunk(_):
+            return torch.ones((10, 512, 512))
+
+        base_zero = tile_store.get_or_create(uuid.uuid4(), (10, None, None), zeros_chunk, window)
+        base_one = tile_store.get_or_create(uuid.uuid4(), (10, None, None), ones_chunk, window)
+
+        def combine(_ctx, left, right):
+            return left + right
+
+        combined = tile_store.get_or_create(
+            uuid.uuid4(),
+            (10, None, None),
+            combine,
+            window,
+            args=(base_zero, base_one),
+            args_windows=(window, window),
+        )
+
+        def double(_ctx, prev):
+            return prev + prev
+
+        doubled = tile_store.get_or_create(
+            uuid.uuid4(),
+            (10, None, None),
+            double,
+            window,
+            args=(combined,),
+            args_windows=(window,),
+        )
+
+        def shift(_ctx, prev):
+            return prev + 3.0
+
+        shifted = tile_store.get_or_create(
+            uuid.uuid4(),
+            (10, None, None),
+            shift,
+            window,
+            args=(doubled,),
+            args_windows=(window,),
+        )
+
+        base_zero.mark_for_cleanup()
+        base_one.mark_for_cleanup()
+        combined.mark_for_cleanup()
+        doubled.mark_for_cleanup()
+
+        result = shifted[:, 0:1024, 0:1024]
+        assert tuple(result.shape) == (10, 1024, 1024)
+        assert torch.allclose(result, torch.full_like(result, 5.0))
+
+        def count_tiles(tensor):
+            return len(list(tile_store.iter_tile_keys_for(tensor.uuid)))
+
+        assert count_tiles(base_zero) == 0
+        assert count_tiles(base_one) == 0
+        assert count_tiles(combined) == 0
+        assert count_tiles(doubled) == 0
+
+    def test_cleanup_dimension_mapped_chain(self, tile_store):
+        """Validate cleanup when dimension-mapped intermediates fan into dependents."""
+
+        base_window = TensorWindow((10, 512, 512))
+
+        def base_chunk(_):
+            return torch.zeros((10, 512, 512))
+
+        base = tile_store.get_or_create(uuid.uuid4(), (10, None, None), base_chunk, base_window)
+
+        slice_window = TensorWindow((512, 512), offset=(-256, -256))
+        slice_arg_window = TensorWindow((10, 512, 512), offset=(0, -256, -256), dimension_map=(None, 0, 1))
+
+        def slice_func(_ctx, upstream):
+            return upstream[0] + 2.0
+
+        sliced = tile_store.get_or_create(
+            uuid.uuid4(),
+            (None, None),
+            slice_func,
+            slice_window,
+            args=(base,),
+            args_windows=(slice_arg_window,),
+        )
+
+        blur_window = TensorWindow((512, 512), offset=(-128, -128))
+
+        def blur_func(_ctx, patch):
+            return patch + 3.0
+
+        blurred = tile_store.get_or_create(
+            uuid.uuid4(),
+            (None, None),
+            blur_func,
+            blur_window,
+            args=(sliced,),
+            args_windows=(TensorWindow((512, 512), offset=(-128, -128)),),
+        )
+
+        base.mark_for_cleanup()
+        sliced.mark_for_cleanup()
+
+        result = blurred[-512:1024, -512:1024]
+        assert tuple(result.shape) == (1536, 1536)
+        assert torch.allclose(result, torch.full_like(result, 5.0))
+
+        def count_tiles(tensor):
+            return len(list(tile_store.iter_tile_keys_for(tensor.uuid)))
+
+        assert count_tiles(base) == 0
+        assert count_tiles(sliced) == 0
+
+
 class TestInfiniteTensorIntegration:
     """Integration tests combining multiple features."""
     
@@ -287,9 +410,97 @@ class TestInfiniteTensorIntegration:
         assert slice2.shape == (2, 100, 100)
         assert slice3.shape == (10, 100, 100)
 
+    def test_hdf5_chain_persistence_with_cleanup(self, tmp_path):
+        """Ensure HDF5 stores survive cleanup and reuse the same file."""
+        pytest.importorskip("h5py")
+        from infinite_tensor.tilestore.hdf5_tilestore import HDF5TileStore
 
-if __name__ == "__main__":
-    # Allow running tests directly with python (basic smoke tests)
-    TestInfiniteTensorMemoryManagement().test_pyramid_cleanup(MemoryTileStore())
-    TestInfiniteTensorMemoryManagement().test_pyramid_cleanup_2(MemoryTileStore())
+        file_path = tmp_path / "chain_persistence.h5"
+        window_shape = (1, 128, 128)
+        window = TensorWindow(window_shape)
+        base_id, inc1_id, inc2_id = "base-hdf5", "inc1-hdf5", "inc2-hdf5"
+
+        def base_func(ctx):
+            return torch.full(window_shape, 2.0)
+
+        def increment(ctx, prev):
+            return prev + 1
+
+        store = HDF5TileStore(file_path, tile_cache_size=2)
+
+        base = store.get_or_create(
+            base_id,
+            (1, None, None),
+            base_func,
+            window,
+            chunk_size=128,
+        )
+        inc1 = store.get_or_create(
+            inc1_id,
+            (1, None, None),
+            increment,
+            window,
+            args=(base,),
+            args_windows=(window,),
+            chunk_size=128,
+        )
+        inc2 = store.get_or_create(
+            inc2_id,
+            (1, None, None),
+            increment,
+            window,
+            args=(inc1,),
+            args_windows=(window,),
+            chunk_size=128,
+        )
+
+        base[:, 0:256, 0:256]
+        inc1[:, 0:128, 0:128]
+        inc1[:, 0:128, 128:256]
+        result_before = inc2[:, 0:128, 0:128]
+
+        tiles_before = set(store.iter_tile_keys_for(inc1.uuid))
+        assert tiles_before, "Expected inc1 to materialize tiles before cleanup"
+
+        inc1.mark_for_cleanup()
+
+        tiles_after = set(store.iter_tile_keys_for(inc1.uuid))
+        assert tiles_after, "Cleanup should not remove every inc1 tile"
+        assert len(tiles_after) < len(tiles_before)
+
+        store.close()
+        del store
+        assert file_path.exists()
+
+        store_reload = HDF5TileStore(file_path, tile_cache_size=2)
+        base_re = store_reload.get_or_create(
+            base_id,
+            (1, None, None),
+            base_func,
+            window,
+            chunk_size=128,
+        )
+        inc1_re = store_reload.get_or_create(
+            inc1_id,
+            (1, None, None),
+            increment,
+            window,
+            chunk_size=128,
+        )
+        inc2_re = store_reload.get_or_create(
+            inc2_id,
+            (1, None, None),
+            increment,
+            window,
+            chunk_size=128,
+        )
+
+        result_after = inc2_re[:, 0:128, 0:128]
+        assert torch.allclose(result_after, result_before)
+
+        reloaded_tiles = set(store_reload.iter_tile_keys_for(inc1_re.uuid))
+        assert reloaded_tiles == tiles_after
+
+        store_reload.close()
+
     

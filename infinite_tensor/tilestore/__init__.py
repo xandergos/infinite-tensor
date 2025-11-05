@@ -6,13 +6,13 @@ their lifecycle, retrieval, and cleanup.
 
 The abstract TileStore interface allows for different storage strategies:
 - MemoryTileStore: Fast in-memory storage (default)
-- Future: DiskTileStore, DistributedTileStore, etc.
+- HDF5TileStore: Persistent HDF5-backed storage for large datasets
 """
 
 import abc
 import uuid
 import numpy as np
-from typing import List, Optional, Dict, Any, Tuple, Iterable, Set
+from typing import List, Dict, Any, Tuple, Iterable, Set
 
 class TileStore(abc.ABC):
     """Abstract base class for tile storage backends.
@@ -87,7 +87,6 @@ class MemoryTileStore(TileStore):
         self._tensor_meta: Dict[str, Any] = {}
         self._processed_windows_by_tensor: Dict[str, Set[Tuple[int, ...]]] = {}
 
-    # New per-tensor APIs
     def register_tensor_meta(self, tensor_id: str, meta: dict) -> None:
         self._tensor_meta[tensor_id] = meta
         self._processed_windows_by_tensor[tensor_id] = set()
@@ -115,6 +114,9 @@ class MemoryTileStore(TileStore):
         # Remove metadata
         if tensor_id in self._tensor_meta:
             del self._tensor_meta[tensor_id]
+        # Remove tensor instance
+        if tensor_id in self._tensor_store:
+            del self._tensor_store[tensor_id]
 
     def get_tile_for(self, tensor_id: str, tile_index: tuple[int, ...]):
         return self._tile_store.get((tensor_id, tile_index))
@@ -151,13 +153,15 @@ class MemoryTileStore(TileStore):
         from infinite_tensor.infinite_tensor import InfiniteTensor, DEFAULT_DTYPE
         # Normalize tensor_id to str, generate if missing
         try:
-            # Fast path when a UUID object is passed
             tid_str = str(tensor_id) if tensor_id is not None else str(uuid.uuid4())
         except Exception:
             tid_str = str(uuid.uuid4())
 
-        if tid_str in self._tensor_meta:
-            return InfiniteTensor.from_existing(self, tid_str)
+        # Return existing tensor if already created
+        if tid_str in self._tensor_store:
+            return self._tensor_store[tid_str]
+        
+        # Create new tensor
         tensor = InfiniteTensor(
             shape,
             f,
@@ -173,9 +177,23 @@ class MemoryTileStore(TileStore):
         self._tensor_store[tid_str] = tensor
         return tensor
 
-    def get_tensor(self, tensor_id: Any):
+    def get_tensor(self, tensor_id: Any, f = None):
+        """Get a tensor by its ID.
+        
+        Args:
+            tensor_id: Tensor identifier
+            f: Ignored for MemoryTileStore (kept for interface compatibility)
+            
+        Returns:
+            InfiniteTensor instance
+            
+        Raises:
+            KeyError: If tensor not found
+        """
         tid_str = str(tensor_id)
         if tid_str not in self._tensor_store:
             raise KeyError(f"Tensor {tid_str} not found")
         return self._tensor_store[tid_str]
 
+
+__all__ = ["TileStore", "MemoryTileStore", "HDF5TileStore"]
