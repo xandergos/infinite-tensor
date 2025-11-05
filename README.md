@@ -117,16 +117,6 @@ out = dep[:, 0:512, 0:512]  # ones
 
 Note: Do not manually slice dependencies (e.g., using `TensorWindow.get_bounds`). Always pass upstream tensors via `args` with matching `args_windows`. Manual slicing is not recommended and can break dependency tracking and memory management.
 
-### 2. Memory Management
-
-- Memory is automatically managed and cached tiles are reused
-- Use context managers for scoped cleanup
-- Call `tensor.mark_for_cleanup()` when you know a tensor is no longer needed
-
-```python
-tensor.mark_for_cleanup()
-```
-
 ## Important Notes
 
 1. **Create via TileStore**: Construct tensors with `tile_store.get_or_create(...)`. Direct construction of `InfiniteTensor` is not supported.
@@ -188,7 +178,7 @@ Common issues and solutions:
 1. **Memory Issues**:
    - Reduce window size
    - Reduce chunk size
-   - Use context managers or `.mark_for_cleanup()` for cleanup
+   - Reinitialize the relevant `TileStore` if tiles need to be discarded
 
 2. **Shape Mismatches**:
    - Ensure your function returns exactly the window size

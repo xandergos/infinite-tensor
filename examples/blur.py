@@ -1,4 +1,5 @@
-from infinite_tensors.infinite_tensors import *
+import torch
+from infinite_tensor import *
 import matplotlib.pyplot as plt
 import torchvision.transforms.v2.functional as F
 

@@ -1,25 +1,14 @@
-from dataclasses import dataclass, field
-import json
-from functools import lru_cache
-import gc
+from dataclasses import dataclass
 import logging
-import math
-import os
-import random
-import tempfile
-import time
 from typing import Any, Callable, Optional, Union
-import weakref
 import numpy as np
 import torch
-import h5py
-from collections import OrderedDict
 import itertools
 import uuid
 
 from infinite_tensor.tensor_window import TensorWindow
-from infinite_tensor.tilestore import MemoryTileStore, TileStore
-from infinite_tensor.utils import normalize_slice, standardize_indices
+from infinite_tensor.tilestore import TileStore
+from infinite_tensor.utils import standardize_indices
 
 # COORDINATE SYSTEM DEFINITIONS:
 # pixel space - Pixel space with all dimensions included (raw tensor coordinates)
@@ -31,30 +20,10 @@ DEFAULT_CHUNK_SIZE = 512
 DEFAULT_DTYPE = torch.float32
 
 # ERROR MESSAGES
-DEPENDENCY_ERROR_MSG = "Setting values on infinite tensors with dependencies is not supported, as the tensor's state may be inconsistent. Please set values before creating any dependent tensors."
 TILE_DELETED_ERROR_MSG = "Tile has been deleted. This indicates either a bug or an attempt to access a tensor after cleanup."
 SHAPE_MISMATCH_ERROR_MSG = "Value shape {actual} does not match indexed shape {expected}"
 OUTPUT_SHAPE_ERROR_MSG = "Function output shape {actual} does not match expected window shape {expected}"
 DEVICE_MISMATCH_ERROR_MSG = "Device mismatch: value is on {actual}, but infinite tensors require CPU tensors."
-
-@dataclass
-class TensorConfig:
-    """Configuration for InfiniteTensor behavior.
-    
-    This centralizes configuration options and makes it easier to add
-    new configuration parameters without changing the constructor signature.
-    """
-    chunk_size: Union[int, tuple[int, ...]] = DEFAULT_CHUNK_SIZE
-    dtype: torch.dtype = DEFAULT_DTYPE
-    enable_logging: bool = False
-    memory_cleanup_threshold: float = 0.8  # Cleanup when memory usage exceeds this fraction
-    
-    def __post_init__(self):
-        """Validate configuration after initialization."""
-        if isinstance(self.chunk_size, int) and self.chunk_size <= 0:
-            raise ValueError("chunk_size must be positive")
-        if isinstance(self.chunk_size, tuple) and any(c <= 0 for c in self.chunk_size):
-            raise ValueError("All chunk sizes must be positive")
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -66,10 +35,6 @@ class InfiniteTensorError(Exception):
 
 class TileAccessError(InfiniteTensorError):
     """Raised when trying to access a deleted or invalid tile."""
-    pass
-
-class DependencyError(InfiniteTensorError):
-    """Raised when operations conflict with tensor dependencies."""
     pass
 
 class ShapeMismatchError(InfiniteTensorError):
@@ -165,27 +130,26 @@ def _validate_tensor_windows(
 
 @dataclass
 class InfinityTensorTile:
-    """A single tile storing a chunk of tensor data.
-    
-    This represents a contiguous chunk of an infinite tensor that fits in memory.
-    Each tile tracks how many dependency windows have been processed to enable
-    automatic cleanup when the tile is no longer needed.
-    
-    Attributes:
-        values: The actual tensor data for this tile
-        dependency_windows_processed: Counter tracking how many dependency windows 
-                                    that reference this tile have been processed.
-                                    Used for automatic memory management.
-    """
+    """A single tile storing a chunk of tensor data."""
+
     values: torch.Tensor
-    num_windows: int
-    num_windows_processed: int = 0
 
 class InfiniteTensor:
     @classmethod
-    def from_existing(cls, store: TileStore, tensor_id: str) -> "InfiniteTensor":
-        """Return the existing tensor instance registered in the store."""
-        return store.get_tensor_meta(tensor_id)
+    def from_existing(cls, store: TileStore, tensor_id: str, f: Optional[Callable] = None) -> "InfiniteTensor":
+        """Return the existing tensor instance registered in the store.
+        
+        Args:
+            store: TileStore containing the tensor
+            tensor_id: Unique identifier for the tensor
+            f: Optional computation function. Required if tensor is not in cache
+               and needs to be reconstructed from metadata.
+               
+        Returns:
+            InfiniteTensor instance
+        """
+        return store.get_tensor(tensor_id, f=f)
+    
     def __init__(self,
                  shape: tuple[int|None, ...],
                  f: Callable,
@@ -283,9 +247,6 @@ class InfiniteTensor:
         self._output_window = output_window
         self._tile_shape = tile_shape
         self._tile_bytes = tile_bytes
-        self._dependency_windows = []
-        self._marked_for_cleanup = False
-        self._fully_cleaned = False
 
         # Register this tensor instance in the store
         self._store.register_tensor_meta(self._uuid, self.to_json())
@@ -336,28 +297,6 @@ class InfiniteTensor:
     def tile_bytes(self) -> int:
         return self._tile_bytes
 
-    @property
-    def dependency_windows(self) -> list:
-        return self._dependency_windows
-    
-    @dependency_windows.setter
-    def dependency_windows(self, value: list):
-        self._dependency_windows = value
-
-    @property
-    def marked_for_cleanup(self) -> bool:
-        return self._marked_for_cleanup
-    @marked_for_cleanup.setter
-    def marked_for_cleanup(self, value: bool):
-        self._marked_for_cleanup = bool(value)
-
-    @property
-    def fully_cleaned(self) -> bool:
-        return self._fully_cleaned
-    @fully_cleaned.setter
-    def fully_cleaned(self, value: bool):
-        self._fully_cleaned = bool(value)
-
     def _calculate_indexed_shape(self, indices: tuple[slice, ...]) -> list[int]:
         """Calculate the shape of the result when indexing with given indices.
         
@@ -406,20 +345,6 @@ class InfiniteTensor:
             value = value.reshape(expected_shape)
             
         return value
-
-    def _get_tile_key(self, tile_index: tuple[int, ...]) -> tuple[str, tuple[int, ...]]:
-        """Generate a unique key for storing/retrieving a tile.
-        
-        Combines the tensor's UUID with the tile index to create a globally unique
-        identifier for this specific tile.
-        
-        Args:
-            tile_index: N-dimensional index of the tile in tile space
-            
-        Returns:
-            Tuple containing (tensor_uuid, tile_index) for unique identification
-        """
-        return (self._uuid, tile_index)
 
     def _pixel_slices_to_tile_ranges(self, slices: tuple[slice, ...]) -> tuple[slice, ...]:
         """Convert pixel-space slices to tile-space ranges.
@@ -603,9 +528,6 @@ class InfiniteTensor:
             # Mix integers and slices
             tensor[0, :, 0:10] = torch.ones(5, 10)
         """
-        if self.dependency_windows or self.marked_for_cleanup:
-            raise DependencyError(DEPENDENCY_ERROR_MSG)
-        
         indices, collapse_dims = standardize_indices(self.shape, indices)
         tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
@@ -634,8 +556,6 @@ class InfiniteTensor:
         Unlike __setitem__, this adds to existing values and can create tiles on-demand.
         It's used internally during function application to accumulate results.
 
-        Additionally, increments the dependency_windows_processed counter for the tiles.
-
         Args:
             indices: Tuple of indices/slices where to add the value
             value: Tensor value to add (will be converted to correct dtype)
@@ -652,8 +572,6 @@ class InfiniteTensor:
         indices, collapse_dims = standardize_indices(self.shape, indices)
         tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
-        #self._apply_f_range(indices)
-        
         # Validate and prepare value
         value = self._validate_and_prepare_value(indices, value, collapse_dims)
             
@@ -661,12 +579,7 @@ class InfiniteTensor:
         for tile_index in itertools.product(*tile_ranges):
             tile = self._store.get_tile_for(self._uuid, tile_index)
             if tile is None:
-                tile = InfinityTensorTile(values=torch.zeros(self.tile_shape, dtype=self.dtype), num_windows=self.count_windows(tile_index))
-            tile.num_windows_processed += 1
-            if tile.num_windows_processed == tile.num_windows:
-                for i, arg in enumerate(self.args):
-                    upstream = self._store.get_tensor(arg)
-                    upstream._alert_dependent_used(list(self._get_dependency_tiles(tile_index)))
+                tile = InfinityTensorTile(values=torch.zeros(self.tile_shape, dtype=self.dtype))
 
             intersected_indices = self._intersect_slices(indices, tile_index)
             tile_space_indices = self._translate_slices(intersected_indices, tile_index)
@@ -733,7 +646,8 @@ class InfiniteTensor:
             upstream = self._store.get_tensor(self.args[i])
             arg_window = self.args_windows[i]
             args.append(upstream[arg_window.get_bounds(window_index)])
-        output = self.f(window_index, *args)
+        with torch.no_grad():
+            output = self.f(window_index, *args)
         
         # Verify output shape matches the expected window shape
         expected_shape = self.output_window.size
@@ -741,95 +655,6 @@ class InfiniteTensor:
             raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
         
         self._add_op(self.output_window.get_bounds(window_index), output)
-
-    def count_windows(self, tile_index: tuple[int, ...]) -> int:
-        """Count the number of windows that intersect a given tile."""
-        tile_pixel_slices = self._get_tile_bounds(tile_index)
-        window_slices = self.output_window.pixel_range_to_window_range(tile_pixel_slices)
-        count = 1
-        for s in window_slices:
-            count *= s.stop - s.start
-        return count
-
-
-    def _alert_dependent_used(self, dependency_tiles: list[tuple[str, tuple[int, ...]]]):
-        """Mark a dependent tile as used and potentially trigger cleanup.
-        
-        This is called when a dependent tensor processes a window that references
-        this tensor. It increments the processing counter for affected tiles and
-        triggers cleanup if tiles are no longer needed.
-        
-        Args:
-            dependency_tiles: List of tuples containing the tensor ID and tile index of the dependency tiles
-            
-        Internal Process:
-            1. Determine which tiles are affected by the processed window
-            2. Increment dependency_windows_processed counter for each tile
-            3. If tensor is marked for cleanup, delete tiles that are no longer needed
-            4. Attempt full cleanup if all dependencies are satisfied
-        """
-        for tensor_id, dep_tile_index in dependency_tiles:
-            if not self._is_tile_needed(dep_tile_index):
-                self._store.delete_tile_for(tensor_id, dep_tile_index)
-        self._full_cleanup()
-    
-    def _get_dependency_tiles(self, tile_index: tuple[int, ...]):
-        """Get all tiles that this tile depends on."""
-        tile_pixel_slices = self._get_tile_bounds(tile_index)
-        output_window_slices = self.output_window.pixel_range_to_window_range(tile_pixel_slices)
-        
-        for arg, arg_window in zip(self.args, self.args_windows):
-            tensor = self._store.get_tensor(arg)
-            arg_pixel_slice = arg_window.get_bounds(output_window_slices)
-            arg_tile_ranges = [range(s.start, s.stop) for s in tensor._pixel_slices_to_tile_ranges(arg_pixel_slice)]
-            for arg_tile_index in itertools.product(*arg_tile_ranges):
-                yield (tensor._uuid, arg_tile_index)
-
-    def _get_dependent_tiles(self, tile_index: tuple[int, ...]):
-        """Get all tiles that are dependent on a given tile.
-        
-        This is used to determine if all dependents of a tile are processed.
-        """
-        tile_pixel_slices = self._get_tile_bounds(tile_index)
-        for tensor_id in self._store.get_dependents(self._uuid):
-            tensor = self._store.get_tensor(tensor_id)
-            for arg, arg_window in filter(lambda x: x[0] == self._uuid, zip(tensor.args, tensor.args_windows)):
-                input_window_slices = arg_window.pixel_range_to_window_range(tile_pixel_slices)
-                output_window_slices = arg_window.inverse_map_window_slices(input_window_slices, len(tensor.shape))
-                dependent_pixel_slice = tensor.output_window.get_bounds(output_window_slices)
-                dependent_tile_ranges = [range(s.start, s.stop) for s in tensor._pixel_slices_to_tile_ranges(dependent_pixel_slice)]
-                for dep_tile_index in itertools.product(*dependent_tile_ranges):
-                    yield tensor_id, dep_tile_index
-    
-    def _is_tile_needed(self, tile_index: tuple[int, ...]) -> bool:
-        """Determine if a tile is still needed by dependency tracking.
-        
-        This is the core logic for automatic memory management. It calculates
-        how many dependency windows should reference this tile and compares
-        that to how many have actually been processed.
-        
-        Args:
-            tile_index: Index of the tile to check
-            
-        Returns:
-            True if the tile is still needed, False if it can be safely deleted
-            
-        Internal Logic:
-            1. Convert tile bounds to pixel space
-            2. For each dependent tensor:
-                - Get all arg_windows that reference this tensor
-                - Find window slice that intersects with the tile
-                - Find all tiles that intersect with that window slice
-                - Check if any of those tiles are not processed
-            3. Return False if all dependents are processed
-        """
-        for tensor_id, dep_tile_index in self._get_dependent_tiles(tile_index):
-            tile = self._store.get_tile_for(tensor_id, dep_tile_index)
-            if tile is None:
-                return True
-            if tile.num_windows_processed < tile.num_windows:
-                return True
-        return False
 
     def _get_tile_bounds(self, tile_index: tuple[int, ...]) -> tuple[slice, ...]:
         """Calculate the pixel-space boundaries of a tile.
@@ -863,57 +688,7 @@ class InfiniteTensor:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.mark_for_cleanup()
         return False  # Don't suppress any exceptions
-
-    def __del__(self):
-        try:
-            self.mark_for_cleanup()
-        except Exception:
-            pass
-                
-    def mark_for_cleanup(self):
-        """Mark this tensor for cleanup and begin aggressive memory management.
-        
-        This initiates the cleanup process by marking the tensor for deletion
-        and immediately removing any tiles that are no longer needed. Called
-        automatically during garbage collection (__del__).
-        
-        Process:
-            1. Mark tensor as ready for cleanup
-            2. Immediately delete any tiles that have no pending dependencies
-            3. Trigger full cleanup if possible
-        """
-        if not self.marked_for_cleanup:
-            # Delete tiles that are no longer needed
-            for tile_index in list(self._store.iter_tile_keys_for(self._uuid)):
-                if not self._is_tile_needed(tile_index):
-                    self._store.delete_tile_for(self._uuid, tile_index)
-            self._full_cleanup()
-            self.marked_for_cleanup = True
-            
-    def _full_cleanup(self):
-        """Perform complete cleanup when tensor is no longer needed.
-        
-        This is the final cleanup phase that occurs when:
-        1. Tensor is marked for cleanup
-        2. All tiles have been processed and deleted
-        3. No other tensors depend on this one
-        
-        Actions:
-            - Clear the tile store completely
-            - Remove this tensor from its dependencies' reference lists
-            - Recursively trigger cleanup in dependency tensors
-            - Mark tensor as fully cleaned to prevent duplicate cleanup
-        """
-        if self.marked_for_cleanup and (next(self._store.iter_tile_keys_for(self._uuid), None) is None) and len(self.dependency_windows) == 0 and not self.fully_cleaned:
-            # Remove this tensor's dependency registrations from its args
-            for arg_id, arg_window in zip(self.args, self.args_windows):
-                upstream_tensor = self._store.get_tensor(arg_id)
-                upstream_tensor._full_cleanup()
-            # No kwargs cleanup
-            # Finally clear this tensor's state from the store
-            self._store.clear_tensor(self._uuid)
 
     def to_json(self) -> dict:
         """Serialize this tensor's metadata to JSON."""

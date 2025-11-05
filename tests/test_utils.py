@@ -3,7 +3,7 @@
 import torch
 import numpy as np
 from typing import Tuple, Callable, Optional
-from infinite_tensor.infinite_tensor import InfiniteTensor, TensorWindow
+from infinite_tensor import InfiniteTensor, TensorWindow
 from infinite_tensor.tilestore import MemoryTileStore
 import uuid
 
