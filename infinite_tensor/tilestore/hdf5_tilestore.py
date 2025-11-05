@@ -8,7 +8,7 @@ work with datasets larger than available memory.
 import uuid
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Callable, Optional
+from typing import Any, Dict, Iterable, Callable, Optional
 from collections import OrderedDict
 from infinite_tensor.tilestore import TileStore
 
@@ -75,7 +75,6 @@ class HDF5TileStore(TileStore):
             # Truncate file by opening in 'w' mode
             with h5py.File(self.filepath, 'w') as f:
                 f.create_group("tensors")
-                f.create_group("dependencies")
             self.mode = 'a'  # Switch to append for subsequent operations
         elif mode == 'r':
             self.mode = 'r'  # Read-only
@@ -92,7 +91,6 @@ class HDF5TileStore(TileStore):
         self._function_cache: Dict[str, Callable] = {}
         self._tensor_cache: Dict[str, Any] = {}  # Tensor instances
         self._metadata_cache: Dict[str, dict] = {}  # Tensor metadata
-        self._dependents_cache: Dict[str, List[str]] = {}  # Dependency relationships
         self._processed_windows_cache: Dict[str, set] = {}  # Processed windows per tensor
         
         # Initialize file structure (only if not read-only)
@@ -106,8 +104,6 @@ class HDF5TileStore(TileStore):
         with h5py.File(self.filepath, "a") as f:
             if "tensors" not in f:
                 f.create_group("tensors")
-            if "dependencies" not in f:
-                f.create_group("dependencies")
     
     def _cache_tile(self, tensor_id: str, tile_index: tuple[int, ...], tile) -> None:
         """Add tile to LRU cache, evicting oldest if cache is full.
@@ -277,34 +273,6 @@ class HDF5TileStore(TileStore):
                 dtype=dt,
             )
         
-        # Register dependencies
-        dependencies = meta.get("args", [])
-        dep_group = f["dependencies"]
-        
-        for dependency in dependencies:
-            dep_path = f"dependencies/{dependency}"
-            if dep_path not in f:
-                dt = h5py.special_dtype(vlen=str)
-                dep_group.create_dataset(
-                    dependency,
-                    shape=(0,),
-                    maxshape=(None,),
-                    dtype=dt,
-                )
-            
-            # Add current tensor as dependent
-            dep_ds = dep_group[dependency]
-            current_deps_raw = dep_ds[:]
-            # Decode bytes to strings for comparison
-            current_deps = [d.decode() if isinstance(d, bytes) else str(d) for d in current_deps_raw]
-            if tensor_id not in current_deps:
-                new_size = len(current_deps) + 1
-                dep_ds.resize((new_size,))
-                dep_ds[new_size - 1] = tensor_id
-                # Update cache with full list from disk to avoid partial cache
-                current_deps.append(tensor_id)
-                self._dependents_cache[dependency] = current_deps
-        
         f.flush()
     
     def get_tensor_meta(self, tensor_id: str) -> dict:
@@ -338,34 +306,6 @@ class HDF5TileStore(TileStore):
         self._metadata_cache[tensor_id] = meta
         return meta
     
-    def get_dependents(self, tensor_id: str) -> List[str]:
-        """Fetch the dependents of a tensor.
-        
-        Args:
-            tensor_id: Tensor identifier
-            
-        Returns:
-            List of dependent tensor IDs
-        """
-        # Check cache first
-        if tensor_id in self._dependents_cache:
-            return self._dependents_cache[tensor_id]
-        
-        # Load from disk and cache
-        f = self._get_file()
-        dep_group = f["dependencies"]
-        dep_path = f"{tensor_id}"
-        
-        if dep_path not in dep_group:
-            self._dependents_cache[tensor_id] = []
-            return []
-        
-        # Decode bytes to strings
-        deps = dep_group[dep_path][:]
-        deps_list = [dep.decode() if isinstance(dep, bytes) else str(dep) for dep in deps]
-        self._dependents_cache[tensor_id] = deps_list
-        return deps_list
-    
     def clear_tensor(self, tensor_id: str) -> None:
         """Remove all state for a tensor (tiles, windows, metadata).
         
@@ -383,8 +323,6 @@ class HDF5TileStore(TileStore):
             del self._tensor_cache[tensor_id]
         if tensor_id in self._metadata_cache:
             del self._metadata_cache[tensor_id]
-        if tensor_id in self._dependents_cache:
-            del self._dependents_cache[tensor_id]
         if tensor_id in self._processed_windows_cache:
             del self._processed_windows_cache[tensor_id]
         
@@ -395,11 +333,6 @@ class HDF5TileStore(TileStore):
         tensor_path = f"tensors/{tensor_id}"
         if tensor_path in f:
             del f[tensor_path]
-        
-        # Remove dependency entry
-        dep_path = f"dependencies/{tensor_id}"
-        if dep_path in f:
-            del f[dep_path]
         
         f.flush()
     
@@ -480,24 +413,16 @@ class HDF5TileStore(TileStore):
         if encoded_idx not in tiles_group:
             return None
         
-        # Load tile data and metadata
+        # Load tile data
         tile_dataset = tiles_group[encoded_idx]
         values = tile_dataset[:]
-        
-        # Get metadata from attributes
-        num_windows = tile_dataset.attrs.get('num_windows', 0)
-        num_windows_processed = tile_dataset.attrs.get('num_windows_processed', 0)
         
         # Import locally to avoid circular dependency
         from infinite_tensor.infinite_tensor import InfinityTensorTile
         import torch
         
         # Convert numpy array back to torch tensor
-        tile = InfinityTensorTile(
-            values=torch.from_numpy(values),
-            num_windows=int(num_windows),
-            num_windows_processed=int(num_windows_processed)
-        )
+        tile = InfinityTensorTile(values=torch.from_numpy(values))
         
         # Cache the loaded tile
         self._cache_tile(tensor_id, tile_index, tile)
@@ -525,13 +450,9 @@ class HDF5TileStore(TileStore):
         from infinite_tensor.infinite_tensor import InfinityTensorTile
         if isinstance(value, InfinityTensorTile):
             tile_data = value.values
-            num_windows = value.num_windows
-            num_windows_processed = value.num_windows_processed
         else:
             # Fallback for raw arrays (shouldn't happen in normal usage)
             tile_data = value
-            num_windows = 0
-            num_windows_processed = 0
         
         # Convert torch tensor to numpy for HDF5 storage
         import torch
@@ -549,11 +470,6 @@ class HDF5TileStore(TileStore):
             compression=self.compression,
             compression_opts=self.compression_opts,
         )
-        
-        # Store metadata as attributes
-        dataset.attrs['num_windows'] = num_windows
-        dataset.attrs['num_windows_processed'] = num_windows_processed
-        
         f.flush()
     
     def delete_tile_for(self, tensor_id: str, tile_index: tuple[int, ...]) -> None:

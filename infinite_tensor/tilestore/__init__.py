@@ -12,7 +12,7 @@ The abstract TileStore interface allows for different storage strategies:
 import abc
 import uuid
 import numpy as np
-from typing import List, Dict, Any, Tuple, Iterable, Set
+from typing import Dict, Any, Tuple, Iterable, Set
 
 class TileStore(abc.ABC):
     """Abstract base class for tile storage backends.
@@ -32,10 +32,6 @@ class TileStore(abc.ABC):
         """Fetch metadata dict for a tensor."""
         raise NotImplementedError
     
-    def get_dependents(self, tensor_id: str) -> List[str]:
-        """Fetch the dependents of a tensor."""
-        raise NotImplementedError
-
     def clear_tensor(self, tensor_id: str) -> None:
         """Remove all state for a tensor (tiles, windows, metadata)."""
         raise NotImplementedError
@@ -83,27 +79,16 @@ class MemoryTileStore(TileStore):
         super().__init__()
         self._tile_store: Dict[tuple, Any] = {}
         self._tensor_store: Dict[str, Any] = {}
-        self._dependents = {}
         self._tensor_meta: Dict[str, Any] = {}
         self._processed_windows_by_tensor: Dict[str, Set[Tuple[int, ...]]] = {}
 
     def register_tensor_meta(self, tensor_id: str, meta: dict) -> None:
         self._tensor_meta[tensor_id] = meta
         self._processed_windows_by_tensor[tensor_id] = set()
-        
-        # Register dependencies
-        dependencies = meta['args']
-        for dependency in dependencies:
-            if dependency not in self._dependents:
-                self._dependents[dependency] = []
-            self._dependents[dependency].append(tensor_id)
 
     def get_tensor_meta(self, tensor_id: str) -> dict:
         return self._tensor_meta[tensor_id]
     
-    def get_dependents(self, tensor_id: str) -> List[str]:
-        return self._dependents.get(tensor_id, [])
-
     def clear_tensor(self, tensor_id: str) -> None:
         # Remove tiles
         for tile_idx in list(self.iter_tile_keys_for(tensor_id)):
