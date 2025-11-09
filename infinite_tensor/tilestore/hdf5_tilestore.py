@@ -260,7 +260,9 @@ class HDF5TileStore(TileStore):
         metadata_group = tensor_group["metadata"]
         
         # Store metadata as JSON in attributes
-        metadata_group.attrs["meta"] = json.dumps(meta)
+        json_dump = json.dumps(meta)
+        if metadata_group.attrs.get("meta") != json_dump:
+            metadata_group.attrs["meta"] = json_dump
         
         # Create empty processed windows dataset
         if "processed_windows" not in tensor_group:
