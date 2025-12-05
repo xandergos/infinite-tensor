@@ -58,7 +58,8 @@ class TileStore(abc.ABC):
                       args: tuple = None,
                       args_windows = None,
                       chunk_size: int | tuple[int, ...] = 512,
-                      dtype=None):
+                      dtype=None,
+                      batch_size: int | None = None):
         """Create or return an InfiniteTensor bound to this store."""
         raise NotImplementedError
     
@@ -133,7 +134,8 @@ class MemoryTileStore(TileStore):
                       args: tuple = None,
                       args_windows = None,
                       chunk_size: int | tuple[int, ...] = 512,
-                      dtype=None):
+                      dtype=None,
+                      batch_size: int | None = None):
         # Local import to avoid circular dependency
         from infinite_tensor.infinite_tensor import InfiniteTensor, DEFAULT_DTYPE
         # Normalize tensor_id to str, generate if missing
@@ -158,6 +160,7 @@ class MemoryTileStore(TileStore):
             tile_store=self,
             tensor_id=tid_str,
             _created_via_store=True,
+            batch_size=batch_size,
         )
         self._tensor_store[tid_str] = tensor
         return tensor

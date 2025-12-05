@@ -338,7 +338,7 @@ class HDF5TileStore(TileStore):
         
         f.flush()
     
-    def _reconstruct_tensor_from_metadata(self, tensor_id: str, f: Callable) -> Any:
+    def _reconstruct_tensor_from_metadata(self, tensor_id: str, f: Callable, batch_size: int | None = None) -> Any:
         """Reconstruct an InfiniteTensor from stored metadata and a provided function.
         
         Args:
@@ -384,6 +384,7 @@ class HDF5TileStore(TileStore):
             tile_store=self,
             tensor_id=tensor_id,
             _created_via_store=True,
+            batch_size=batch_size,
         )
         
         return tensor
@@ -614,6 +615,7 @@ class HDF5TileStore(TileStore):
         args_windows=None,
         chunk_size: int | tuple[int, ...] = 512,
         dtype=None,
+        batch_size: int | None = None,
     ):
         """Create or return an InfiniteTensor bound to this store.
         
@@ -646,7 +648,7 @@ class HDF5TileStore(TileStore):
         
         if tensor_exists:
             # Reconstruct from metadata with provided function
-            tensor = self._reconstruct_tensor_from_metadata(tid_str, f)
+            tensor = self._reconstruct_tensor_from_metadata(tid_str, f, batch_size=batch_size)
             # Cache tensor and function
             self._tensor_cache[tid_str] = tensor
             self._function_cache[tid_str] = f
@@ -664,6 +666,7 @@ class HDF5TileStore(TileStore):
             tile_store=self,
             tensor_id=tid_str,
             _created_via_store=True,
+            batch_size=batch_size,
         )
         
         # Cache tensor and function
