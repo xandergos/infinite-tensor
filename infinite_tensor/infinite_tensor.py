@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import logging
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Iterable, Optional, Union
 import numpy as np
 import torch
 import itertools
@@ -160,6 +160,7 @@ class InfiniteTensor:
                  dtype: torch.dtype = DEFAULT_DTYPE,
                  tile_store: Optional[TileStore] = None,
                  tensor_id: Optional[Any] = None,
+                 batch_size: Optional[int] = None,
                  _created_via_store: bool = False):
         """Initialize an InfiniteTensor.
 
@@ -181,6 +182,7 @@ class InfiniteTensor:
             chunk_size: Size of each chunk. Can be an integer for uniform chunk size, or tuple of integers to specify a different chunk size for each dimension.
                         The number of 'None' values in 'shape' must match the number of dimensions in 'chunk_size' if it is a tuple.
             dtype: PyTorch data type for the tensor (default: torch.float32)
+            batch_size: Number of tensors to batch together. If None, no batching is done.
         """
         # Enforce creation via store.get_or_create
         if not _created_via_store:
@@ -247,7 +249,8 @@ class InfiniteTensor:
         self._output_window = output_window
         self._tile_shape = tile_shape
         self._tile_bytes = tile_bytes
-
+        self._batch_size = batch_size
+        
         # Register this tensor instance in the store
         self._store.register_tensor_meta(self._uuid, self.to_json())
     
@@ -296,6 +299,10 @@ class InfiniteTensor:
     @property
     def tile_bytes(self) -> int:
         return self._tile_bytes
+    
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
 
     def _calculate_indexed_shape(self, indices: tuple[slice, ...]) -> list[int]:
         """Calculate the shape of the result when indexing with given indices.
@@ -479,7 +486,7 @@ class InfiniteTensor:
         tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
         logger.debug(f"Accessing tensor slice with indices: {indices}")
-        self._apply_f_range(indices)
+        self._apply_f_range([indices])
         
         # Calculate output shape
         output_shape = self._calculate_indexed_shape(indices)
@@ -531,7 +538,7 @@ class InfiniteTensor:
         indices, collapse_dims = standardize_indices(self.shape, indices)
         tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
-        self._apply_f_range(indices)
+        self._apply_f_range([indices])
         
         # Validate and prepare value
         value = self._validate_and_prepare_value(indices, value, collapse_dims)
@@ -592,7 +599,7 @@ class InfiniteTensor:
             tile.values[tile_space_indices] += value[value_indices]
             self._store.set_tile_for(self._uuid, tile_index, tile)
 
-    def _apply_f_range(self, pixel_range: tuple[slice, ...]):
+    def _apply_f_range(self, pixel_range: Iterable[tuple[slice, ...]]):
         """Apply the generating function to all windows intersecting a pixel range.
         
         This is the core orchestration method that determines which windows need
@@ -607,12 +614,17 @@ class InfiniteTensor:
             2. Apply the function to each window that hasn't been processed yet
             3. Function outputs are accumulated into tiles via _add_op
         """
-        lowest_window_indexes = self.output_window.get_lowest_intersection(pixel_range)
-        highest_window_indexes = self.output_window.get_highest_intersection(pixel_range)
-        for idx in itertools.product(*[range(l, h+1) for l, h in zip(lowest_window_indexes, highest_window_indexes)]):
-            self._apply_f(idx)
+        # Process windows in batches
+        all_indices = itertools.chain.from_iterable(
+            itertools.product(*[range(l, h+1) for l, h in zip(
+                self.output_window.get_lowest_intersection(sub_pixel_range),
+                self.output_window.get_highest_intersection(sub_pixel_range)
+            )])
+            for sub_pixel_range in pixel_range
+        )
+        self._apply_f(all_indices)
 
-    def _apply_f(self, window_index: tuple[int, ...]) -> torch.Tensor:
+    def _apply_f(self, window_indices: Iterable[tuple[int, ...]]) -> torch.Tensor:
         """Apply the generating function to a specific window.
         
         This method orchestrates the application of the user-provided function to
@@ -633,28 +645,75 @@ class InfiniteTensor:
             5. Accumulate result into tiles using _add_op
             6. Mark dependencies as processed for cleanup tracking
         """
-        if self._store.is_window_processed_for(self._uuid, window_index):
-            logger.debug(f"Window {window_index} already processed, skipping")
-            return
-        
-        logger.debug(f"Processing window {window_index}")
-        self._store.mark_window_processed_for(self._uuid, window_index)
-        
-        # Resolve arg IDs to tensors lazily
-        args = []
+        valid_window_indices = set()
+        for window_index in window_indices:
+            if self._store.is_window_processed_for(self._uuid, window_index):
+                logger.debug(f"Window {window_index} already processed, skipping")
+                continue
+            
+            valid_window_indices.add(window_index)
+        valid_window_indices = list(valid_window_indices)
+            
+        # Pre-process arguments
         for i, arg_window in enumerate(self.args_windows):
             upstream = self._store.get_tensor(self.args[i])
             arg_window = self.args_windows[i]
-            args.append(upstream[arg_window.get_bounds(window_index)])
-        with torch.no_grad():
-            output = self.f(window_index, *args)
+            pixel_ranges = [arg_window.get_bounds(window_index) for window_index in valid_window_indices]
+            upstream._apply_f_range(pixel_ranges)
         
-        # Verify output shape matches the expected window shape
-        expected_shape = self.output_window.size
-        if tuple(output.shape) != tuple(expected_shape):
-            raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
-        
-        self._add_op(self.output_window.get_bounds(window_index), output)
+        if self.batch_size is None:
+            for window_index in valid_window_indices:
+                # Resolve arg IDs to tensors lazily
+                args = []
+                for i, arg_window in enumerate(self.args_windows):
+                    upstream = self._store.get_tensor(self.args[i])
+                    arg_window = self.args_windows[i]
+                    args.append(upstream[arg_window.get_bounds(window_index)])
+                with torch.no_grad():
+                    output = self.f(window_index, *args)
+                
+                # Verify output shape matches the expected window shape
+                expected_shape = self.output_window.size
+                if tuple(output.shape) != tuple(expected_shape):
+                    raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
+                
+                self._add_op(self.output_window.get_bounds(window_index), output)
+            
+                logger.debug(f"Processed window {window_index}")
+                self._store.mark_window_processed_for(self._uuid, window_index)
+        else:
+            def apply_batch(batch_window_indices: list[tuple[int, ...]]):
+                args = [[] for _ in range(len(self.args))]
+                # Resolve args
+                for window_index in batch_window_indices:
+                    for i, arg_window in enumerate(self.args_windows):
+                        upstream = self._store.get_tensor(self.args[i])
+                        arg_window = self.args_windows[i]
+                        args[i].append(upstream[arg_window.get_bounds(window_index)])
+                
+                with torch.no_grad():
+                    outputs = self.f(batch_window_indices, *args)
+                    
+                for window_index, output in zip(batch_window_indices, outputs):
+                    # Verify output shape matches the expected window shape
+                    expected_shape = self.output_window.size
+                    if tuple(output.shape) != tuple(expected_shape):
+                        raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
+                    
+                    self._add_op(self.output_window.get_bounds(window_index), output)
+                
+                    logger.debug(f"Processed window {window_index}")
+                    self._store.mark_window_processed_for(self._uuid, window_index)
+                
+            batched_window_indices = []
+            for window_index in valid_window_indices:
+                batched_window_indices.append(window_index)
+                if len(batched_window_indices) == self.batch_size:
+                    apply_batch(batched_window_indices)
+                    batched_window_indices = []
+            if batched_window_indices:
+                apply_batch(batched_window_indices)
+            
 
     def _get_tile_bounds(self, tile_index: tuple[int, ...]) -> tuple[slice, ...]:
         """Calculate the pixel-space boundaries of a tile.
