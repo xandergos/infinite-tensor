@@ -166,23 +166,6 @@ Check out `examples/blur.py` for a complete example showing how to:
 - Handle boundaries correctly
 - Chain multiple processing steps
 
-## Troubleshooting
-
-Common issues and solutions:
-
-1. **Memory Issues**:
-   - Reduce window size
-   - Reduce chunk size
-   - Reinitialize the relevant `TileStore` if tiles need to be discarded
-
-2. **Shape Mismatches**:
-   - Ensure your function returns exactly the window size
-   - Check that window sizes match between dependent tensors
-
-3. **Performance**:
-   - Adjust chunk size to balance memory use and processing overhead
-   - Consider window overlap requirements carefully
-
 ## License
 
 MIT License - See LICENSE file for details.
