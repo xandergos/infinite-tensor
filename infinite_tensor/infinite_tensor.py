@@ -520,7 +520,9 @@ class InfiniteTensor:
         logger.debug(f"Calculated output shape: {output_shape}")
         
         if self._cache_method == 'direct':
-            return self._getitem_direct(indices, output_shape, collapse_dims)
+            result = self._getitem_direct(indices, output_shape, collapse_dims)
+            self._store.evict_cache_for(self._uuid, self._cache_limit)
+            return result
         else:
             return self._getitem_indirect(indices, output_shape, collapse_dims)
     
@@ -554,7 +556,8 @@ class InfiniteTensor:
         highest = self.output_window.get_highest_intersection(indices)
         window_ranges = [range(l, h + 1) for l, h in zip(lowest, highest)]
         
-        output_tensor = torch.empty(output_shape, dtype=self.dtype)
+        # Use zeros and += to correctly accumulate overlapping window contributions
+        output_tensor = torch.zeros(output_shape, dtype=self.dtype)
         for window_index in itertools.product(*window_ranges):
             cached_output = self._store.get_cached_window_for(self._uuid, window_index)
             if cached_output is None:
@@ -587,7 +590,7 @@ class InfiniteTensor:
                 for s, n in zip(intersected, indices)
             )
             
-            output_tensor[output_indices] = cached_output[window_local_indices]
+            output_tensor[output_indices] += cached_output[window_local_indices]
             
         if collapse_dims:
             target_shape = tuple(s for i, s in enumerate(output_shape) if i not in collapse_dims)
@@ -743,6 +746,27 @@ class InfiniteTensor:
             
             valid_window_indices.add(window_index)
         valid_window_indices = list(valid_window_indices)
+        
+        # Track which upstream windows were used (for cache prioritization)
+        used_windows_by_tensor: dict[str, list[tuple[int, ...]]] = {}
+        
+        def track_upstream_windows():
+            """Calculate which upstream windows will be accessed."""
+            for i, arg_window in enumerate(self.args_windows):
+                upstream = self._store.get_tensor(self.args[i])
+                if upstream._cache_method != 'direct':
+                    continue
+                for window_index in valid_window_indices:
+                    bounds = arg_window.get_bounds(window_index)
+                    lowest = upstream.output_window.get_lowest_intersection(bounds)
+                    highest = upstream.output_window.get_highest_intersection(bounds)
+                    for upstream_window in itertools.product(
+                        *[range(l, h + 1) for l, h in zip(lowest, highest)]
+                    ):
+                        used_windows_by_tensor.setdefault(upstream._uuid, []).append(upstream_window)
+        
+        if self._cache_method == 'direct':
+            track_upstream_windows()
             
         # Pre-process arguments
         for i, arg_window in enumerate(self.args_windows):
@@ -768,7 +792,7 @@ class InfiniteTensor:
                     raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
                 
                 if self._cache_method == 'direct':
-                    self._store.cache_window_for(self._uuid, window_index, output, self._cache_limit)
+                    self._store.cache_window_for(self._uuid, window_index, output)
                 else:
                     self._add_op(self.output_window.get_bounds(window_index), output)
                     self._store.mark_window_processed_for(self._uuid, window_index)
@@ -794,7 +818,7 @@ class InfiniteTensor:
                         raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
                     
                     if self._cache_method == 'direct':
-                        self._store.cache_window_for(self._uuid, window_index, output, self._cache_limit)
+                        self._store.cache_window_for(self._uuid, window_index, output)
                     else:
                         self._add_op(self.output_window.get_bounds(window_index), output)
                         self._store.mark_window_processed_for(self._uuid, window_index)
@@ -809,6 +833,13 @@ class InfiniteTensor:
                     batched_window_indices = []
             if batched_window_indices:
                 apply_batch(batched_window_indices)
+        
+        # Reorder caches: first promote USED windows, then GENERATED windows
+        # This ensures generated windows have highest priority (evicted last)
+        if self._cache_method == 'direct':
+            for tensor_id, windows in used_windows_by_tensor.items():
+                self._store.promote_windows_for(tensor_id, windows)
+            self._store.promote_windows_for(self._uuid, valid_window_indices)
             
 
     def _get_tile_bounds(self, tile_index: tuple[int, ...]) -> tuple[slice, ...]:

@@ -76,7 +76,7 @@ result = tensor[0:1024, 0:1024]
 
 InfiniteTensor supports two caching strategies via `cache_method`:
 
-- **`cache_method='indirect'`** (default): Window outputs are accumulated into tiles. Best for persistent storage (e.g., HDF5TileStore) since it uses the least disk space.
+- **`cache_method='indirect'`** (default): Window outputs are accumulated into tiles. Best for persistent storage (e.g., HDF5TileStore) since it uses the least disk space. Use `tile_size` to indicate the size of the tiles.
 
 - **`cache_method='direct'`**: Window outputs are cached directly with LRU eviction. Best when you want to limit memory usage and don't need persistent storage. Use `cache_limit` to set the max cache size in bytes (default: 10MB), or `None` for unlimited. `tile_size` is ignored with this method.
 

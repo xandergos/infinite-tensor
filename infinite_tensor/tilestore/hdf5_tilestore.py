@@ -622,8 +622,8 @@ class HDF5TileStore(TileStore):
         """Calculate the size of a tensor in bytes."""
         return t.numel() * t.element_size()
 
-    def cache_window_for(self, tensor_id: str, window_index: tuple[int, ...], output, cache_limit: Optional[int]) -> None:
-        """Cache a window output with LRU eviction based on bytes (stored in memory)."""
+    def cache_window_for(self, tensor_id: str, window_index: tuple[int, ...], output) -> None:
+        """Cache a window output without eviction."""
         if tensor_id not in self._window_cache:
             self._window_cache[tensor_id] = OrderedDict()
             self._window_cache_size[tensor_id] = 0
@@ -637,12 +637,26 @@ class HDF5TileStore(TileStore):
         output_bytes = self._tensor_size_bytes(output)
         cache[window_index] = output
         self._window_cache_size[tensor_id] += output_bytes
-        
-        # Evict oldest entries until under limit (if limit is set)
-        if cache_limit is not None:
-            while self._window_cache_size[tensor_id] > cache_limit and len(cache) > 1:
-                _, evicted = cache.popitem(last=False)
-                self._window_cache_size[tensor_id] -= self._tensor_size_bytes(evicted)
+
+    def evict_cache_for(self, tensor_id: str, cache_limit: Optional[int]) -> None:
+        """Evict oldest cache entries until under the byte limit."""
+        if cache_limit is None:
+            return
+        cache = self._window_cache.get(tensor_id)
+        if cache is None:
+            return
+        while self._window_cache_size[tensor_id] > cache_limit and len(cache) > 1:
+            _, evicted = cache.popitem(last=False)
+            self._window_cache_size[tensor_id] -= self._tensor_size_bytes(evicted)
+
+    def promote_windows_for(self, tensor_id: str, window_indices: list[tuple[int, ...]]) -> None:
+        """Move specified windows to end of cache (most recently used) in order."""
+        cache = self._window_cache.get(tensor_id)
+        if cache is None:
+            return
+        for window_index in window_indices:
+            if window_index in cache:
+                cache.move_to_end(window_index)
 
     def get_cached_window_for(self, tensor_id: str, window_index: tuple[int, ...]):
         """Get a cached window output, marking as recently used."""

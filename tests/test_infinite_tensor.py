@@ -177,4 +177,93 @@ class TestInfiniteTensorIntegration:
         assert slice2.shape == (2, 100, 100)
         assert slice3.shape == (10, 100, 100)
 
-    
+    def test_direct_cache_eviction_during_multi_window_access(self, tile_store):
+        """Test that direct caching doesn't evict windows needed for current access.
+        
+        This tests the fix for a bug where cache eviction during _apply_f would
+        evict windows before _getitem_direct could read them, causing TileAccessError.
+        """
+        window = TensorWindow((1, 64, 64))
+        
+        def ones_func(ctx):
+            return torch.ones((1, 64, 64))
+        
+        # Use direct caching with a very small cache limit (smaller than 2 windows)
+        # Each window is 1*64*64*4 = 16KB for float32
+        # Set limit to 20KB so only ~1 window fits, but we'll access 4 windows
+        tensor = tile_store.get_or_create(
+            uuid.uuid4(),
+            (1, None, None),
+            ones_func,
+            window,
+            cache_method='direct',
+            cache_limit=20 * 1024,
+        )
+        
+        # Access a 2x2 grid of windows (128x128 region with 64x64 windows)
+        # This requires 4 windows but cache can only hold ~1
+        result = tensor[:, 0:128, 0:128]
+        
+        assert result.shape == (1, 128, 128)
+        assert torch.allclose(result, torch.ones_like(result))
+
+    def test_direct_cache_prioritizes_generated_windows(self, tile_store):
+        """Test that generated windows have higher cache priority than used windows.
+        
+        After generation, the cache order should be:
+        1. Used (dependency) windows - promoted first
+        2. Generated windows - promoted last (highest priority, evicted last)
+        """
+        window = TensorWindow((1, 64, 64))
+        
+        def base_func(ctx):
+            return torch.ones((1, 64, 64))
+        
+        # Create base tensor with direct caching
+        base = tile_store.get_or_create(
+            uuid.uuid4(),
+            (1, None, None),
+            base_func,
+            window,
+            cache_method='direct',
+            cache_limit=None,  # No limit for this test
+        )
+        
+        # Pre-populate base cache with several windows
+        _ = base[:, 0:64, 0:64]    # window (0, 0, 0)
+        _ = base[:, 64:128, 0:64]  # window (0, 1, 0)
+        _ = base[:, 0:64, 64:128]  # window (0, 0, 1)
+        
+        # Create dependent tensor
+        def dep_func(ctx, upstream=base, w=window):
+            return upstream[w.get_bounds(ctx)] * 2
+        
+        dep = tile_store.get_or_create(
+            uuid.uuid4(),
+            (1, None, None),
+            dep_func,
+            window,
+            cache_method='direct',
+            cache_limit=None,
+        )
+        
+        # Access dependent tensor - this uses window (0, 0, 0) from base
+        result = dep[:, 0:64, 0:64]
+        
+        # Verify result is correct
+        assert torch.allclose(result, torch.ones((1, 64, 64)) * 2)
+        
+        # Check that base's cache has window (0, 0, 0) promoted (it was used)
+        # and dep's cache has window (0, 0, 0) at the end (it was generated)
+        base_cache = tile_store._window_cache.get(base.uuid)
+        dep_cache = tile_store._window_cache.get(dep.uuid)
+        
+        assert base_cache is not None
+        assert dep_cache is not None
+        
+        # The used window should be at the end of base's cache
+        base_keys = list(base_cache.keys())
+        assert (0, 0, 0) == base_keys[-1]
+        
+        # The generated window should be in dep's cache
+        assert (0, 0, 0) in dep_cache
