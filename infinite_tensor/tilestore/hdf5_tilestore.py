@@ -338,12 +338,15 @@ class HDF5TileStore(TileStore):
         
         f.flush()
     
-    def _reconstruct_tensor_from_metadata(self, tensor_id: str, f: Callable, batch_size: int | None = None) -> Any:
+    def _reconstruct_tensor_from_metadata(self, tensor_id: str, f: Callable, batch_size: int | None = None,
+                                          cache_method: str = 'indirect', cache_limit: int | None = 10 * 1024 * 1024) -> Any:
         """Reconstruct an InfiniteTensor from stored metadata and a provided function.
         
         Args:
             tensor_id: Tensor identifier
             f: The computation function for this tensor
+            cache_method: Caching strategy (default from caller or stored metadata)
+            cache_limit: Cache limit for direct caching
             
         Returns:
             InfiniteTensor instance
@@ -362,6 +365,10 @@ class HDF5TileStore(TileStore):
         shape = tuple(None if x is None else int(x) for x in meta['shape'])
         chunk_size = tuple(int(x) for x in meta['chunk_size'])
         dtype = _str_to_dtype(meta['dtype'])
+        
+        # Use stored cache_method/cache_limit if available, otherwise use defaults
+        stored_cache_method = meta.get('cache_method', cache_method)
+        stored_cache_limit = meta.get('cache_limit', cache_limit)
         
         # Reconstruct args (will be tensor IDs, need to get actual tensors)
         arg_ids = meta['args']
@@ -385,6 +392,8 @@ class HDF5TileStore(TileStore):
             tensor_id=tensor_id,
             _created_via_store=True,
             batch_size=batch_size,
+            cache_method=stored_cache_method,
+            cache_limit=stored_cache_limit,
         )
         
         return tensor
@@ -616,6 +625,8 @@ class HDF5TileStore(TileStore):
         chunk_size: int | tuple[int, ...] = 512,
         dtype=None,
         batch_size: int | None = None,
+        cache_method: str = 'indirect',
+        cache_limit: int | None = 10 * 1024 * 1024,
     ):
         """Create or return an InfiniteTensor bound to this store.
         
@@ -628,6 +639,10 @@ class HDF5TileStore(TileStore):
             args_windows: Argument window specifications
             chunk_size: Tile size
             dtype: Data type
+            cache_method: Caching strategy - 'indirect' (default) stores tiles, 
+                         'direct' caches window outputs directly.
+            cache_limit: Maximum cache size in bytes for direct caching (default: 10MB).
+                        None for unlimited cache.
             
         Returns:
             InfiniteTensor instance
@@ -648,7 +663,8 @@ class HDF5TileStore(TileStore):
         
         if tensor_exists:
             # Reconstruct from metadata with provided function
-            tensor = self._reconstruct_tensor_from_metadata(tid_str, f, batch_size=batch_size)
+            tensor = self._reconstruct_tensor_from_metadata(tid_str, f, batch_size=batch_size,
+                                                            cache_method=cache_method, cache_limit=cache_limit)
             # Cache tensor and function
             self._tensor_cache[tid_str] = tensor
             self._function_cache[tid_str] = f
@@ -667,6 +683,8 @@ class HDF5TileStore(TileStore):
             tensor_id=tid_str,
             _created_via_store=True,
             batch_size=batch_size,
+            cache_method=cache_method,
+            cache_limit=cache_limit,
         )
         
         # Cache tensor and function

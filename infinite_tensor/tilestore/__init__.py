@@ -59,8 +59,17 @@ class TileStore(abc.ABC):
                       args_windows = None,
                       chunk_size: int | tuple[int, ...] = 512,
                       dtype=None,
-                      batch_size: int | None = None):
-        """Create or return an InfiniteTensor bound to this store."""
+                      batch_size: int | None = None,
+                      cache_method: str = 'indirect',
+                      cache_limit: int | None = 10 * 1024 * 1024):
+        """Create or return an InfiniteTensor bound to this store.
+        
+        Args:
+            cache_method: Caching strategy - 'indirect' (default) stores tiles, 
+                         'direct' caches window outputs directly.
+            cache_limit: Maximum cache size in bytes for direct caching (default: 10MB).
+                        None for unlimited cache.
+        """
         raise NotImplementedError
     
     def get_tensor(self, tensor_id: str):
@@ -135,7 +144,9 @@ class MemoryTileStore(TileStore):
                       args_windows = None,
                       chunk_size: int | tuple[int, ...] = 512,
                       dtype=None,
-                      batch_size: int | None = None):
+                      batch_size: int | None = None,
+                      cache_method: str = 'indirect',
+                      cache_limit: int | None = 10 * 1024 * 1024):
         # Local import to avoid circular dependency
         from infinite_tensor.infinite_tensor import InfiniteTensor, DEFAULT_DTYPE
         # Normalize tensor_id to str, generate if missing
@@ -161,6 +172,8 @@ class MemoryTileStore(TileStore):
             tensor_id=tid_str,
             _created_via_store=True,
             batch_size=batch_size,
+            cache_method=cache_method,
+            cache_limit=cache_limit,
         )
         self._tensor_store[tid_str] = tensor
         return tensor

@@ -1,6 +1,8 @@
+from collections import OrderedDict
 from dataclasses import dataclass
 import logging
-from typing import Any, Callable, Iterable, Optional, Union
+from typing import Any, Callable, Iterable, Literal, Optional, Union
+import warnings
 import numpy as np
 import torch
 import itertools
@@ -18,6 +20,8 @@ from infinite_tensor.utils import standardize_indices
 # CONSTANTS
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_DTYPE = torch.float32
+DEFAULT_CACHE_METHOD = 'indirect'
+DEFAULT_CACHE_LIMIT_BYTES = 10 * 1024 * 1024  # 10MB
 
 # ERROR MESSAGES
 TILE_DELETED_ERROR_MSG = "Tile has been deleted. This indicates either a bug or an attempt to access a tensor after cleanup."
@@ -97,6 +101,14 @@ def _validate_window_args(args: tuple, args_windows) -> None:
     if args_windows is not None and len(args_windows) != len(args):
         raise ValidationError(f"args_windows length {len(args_windows)} must match args length {len(args)}")
 
+def _validate_cache_method(cache_method: str, cache_limit: Optional[int]) -> None:
+    """Validate cache method and limit parameters."""
+    if cache_method not in ('indirect', 'direct'):
+        raise ValidationError(f"cache_method must be 'indirect' or 'direct', got '{cache_method}'")
+    if cache_method == 'direct' and cache_limit is not None:
+        if not isinstance(cache_limit, int) or cache_limit <= 0:
+            raise ValidationError(f"cache_limit must be a positive integer or None, got {cache_limit}")
+
 def _validate_tensor_windows(
     tensor_shape: tuple[int|None, ...],
     output_window: TensorWindow,
@@ -161,6 +173,8 @@ class InfiniteTensor:
                  tile_store: Optional[TileStore] = None,
                  tensor_id: Optional[Any] = None,
                  batch_size: Optional[int] = None,
+                 cache_method: Literal['indirect', 'direct'] = DEFAULT_CACHE_METHOD,
+                 cache_limit: Optional[int] = DEFAULT_CACHE_LIMIT_BYTES,
                  _created_via_store: bool = False):
         """Initialize an InfiniteTensor.
 
@@ -181,8 +195,11 @@ class InfiniteTensor:
             args_windows: Optional positional argument windows specific to window processing.
             chunk_size: Size of each chunk. Can be an integer for uniform chunk size, or tuple of integers to specify a different chunk size for each dimension.
                         The number of 'None' values in 'shape' must match the number of dimensions in 'chunk_size' if it is a tuple.
+                        Ignored when cache_method='direct'.
             dtype: PyTorch data type for the tensor (default: torch.float32)
             batch_size: Number of tensors to batch together. If None, no batching is done.
+            cache_method: Caching strategy - 'indirect' (default) stores tiles, 'direct' caches window outputs.
+            cache_limit: Maximum cache size in bytes for direct caching (default: 10MB). None for unlimited.
         """
         # Enforce creation via store.get_or_create
         if not _created_via_store:
@@ -191,9 +208,11 @@ class InfiniteTensor:
         # Validate parameters (will be skipped if reconstructing existing tensor)
         _validate_shape(shape)
         _validate_function(f)
+        _validate_cache_method(cache_method, cache_limit)
         
         infinite_dims = sum(1 for dim in shape if dim is None)
-        _validate_chunk_size(chunk_size, infinite_dims)
+        if cache_method == 'indirect':
+            _validate_chunk_size(chunk_size, infinite_dims)
         _validate_window_args(args or (), args_windows)
         
         # Setup store and ID
@@ -250,6 +269,12 @@ class InfiniteTensor:
         self._tile_shape = tile_shape
         self._tile_bytes = tile_bytes
         self._batch_size = batch_size
+        self._cache_method = cache_method
+        self._cache_limit = cache_limit
+        
+        # LRU cache for direct caching (window_index -> output tensor)
+        self._window_cache: OrderedDict[tuple[int, ...], torch.Tensor] = OrderedDict()
+        self._cache_size_bytes: int = 0
         
         # Register this tensor instance in the store
         self._store.register_tensor_meta(self._uuid, self.to_json())
@@ -303,6 +328,41 @@ class InfiniteTensor:
     @property
     def batch_size(self) -> int:
         return self._batch_size
+    
+    @property
+    def cache_method(self) -> str:
+        return self._cache_method
+    
+    @property
+    def cache_limit(self) -> Optional[int]:
+        return self._cache_limit
+
+    def _tensor_size_bytes(self, t: torch.Tensor) -> int:
+        """Calculate the size of a tensor in bytes."""
+        return t.numel() * t.element_size()
+
+    def _cache_window_output(self, window_index: tuple[int, ...], output: torch.Tensor) -> None:
+        """Cache a window output with LRU eviction based on bytes for direct caching."""
+        if window_index in self._window_cache:
+            self._window_cache.move_to_end(window_index)
+            return
+        
+        output_bytes = self._tensor_size_bytes(output)
+        self._window_cache[window_index] = output
+        self._cache_size_bytes += output_bytes
+        
+        # Evict oldest entries until under limit (if limit is set)
+        if self._cache_limit is not None:
+            while self._cache_size_bytes > self._cache_limit and len(self._window_cache) > 1:
+                _, evicted = self._window_cache.popitem(last=False)
+                self._cache_size_bytes -= self._tensor_size_bytes(evicted)
+
+    def _get_cached_window_output(self, window_index: tuple[int, ...]) -> Optional[torch.Tensor]:
+        """Get a cached window output, marking as recently used."""
+        if window_index in self._window_cache:
+            self._window_cache.move_to_end(window_index)
+            return self._window_cache[window_index]
+        return None
 
     def _calculate_indexed_shape(self, indices: tuple[slice, ...]) -> list[int]:
         """Calculate the shape of the result when indexing with given indices.
@@ -483,7 +543,6 @@ class InfiniteTensor:
             tensor[0, :, 0:10]
         """
         indices, collapse_dims = standardize_indices(self.shape, indices)
-        tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
         logger.debug(f"Accessing tensor slice with indices: {indices}")
         self._apply_f_range([indices])
@@ -491,8 +550,17 @@ class InfiniteTensor:
         # Calculate output shape
         output_shape = self._calculate_indexed_shape(indices)
         logger.debug(f"Calculated output shape: {output_shape}")
-                
-        # Create output tensor
+        
+        if self._cache_method == 'direct':
+            return self._getitem_direct(indices, output_shape, collapse_dims)
+        else:
+            return self._getitem_indirect(indices, output_shape, collapse_dims)
+    
+    def _getitem_indirect(self, indices: tuple[slice, ...], output_shape: list[int], 
+                          collapse_dims: list[int]) -> torch.Tensor:
+        """Get values using indirect caching (tile-based storage)."""
+        tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
+        
         output_tensor = torch.empty(output_shape, dtype=self.dtype)
         for tile_index in itertools.product(*tile_ranges):
             tile = self._store.get_tile_for(self._uuid, tile_index)
@@ -509,9 +577,60 @@ class InfiniteTensor:
             target_shape = tuple(s for i, s in enumerate(output_shape) if i not in collapse_dims)
             return output_tensor.reshape(target_shape)
         return output_tensor
+    
+    def _getitem_direct(self, indices: tuple[slice, ...], output_shape: list[int],
+                        collapse_dims: list[int]) -> torch.Tensor:
+        """Get values using direct caching (window output-based storage)."""
+        # Find which windows intersect with the requested region
+        lowest = self.output_window.get_lowest_intersection(indices)
+        highest = self.output_window.get_highest_intersection(indices)
+        window_ranges = [range(l, h + 1) for l, h in zip(lowest, highest)]
+        
+        output_tensor = torch.empty(output_shape, dtype=self.dtype)
+        for window_index in itertools.product(*window_ranges):
+            cached_output = self._get_cached_window_output(window_index)
+            if cached_output is None:
+                raise TileAccessError(f"Window {window_index} not found in cache")
+            
+            # Get the pixel bounds of this window
+            window_bounds = self.output_window.get_bounds(window_index)
+            
+            # Calculate intersection of requested indices with window bounds
+            intersected = []
+            for idx_slice, win_slice in zip(indices, window_bounds):
+                start = max(idx_slice.start, win_slice.start)
+                stop = min(idx_slice.stop, win_slice.stop)
+                intersected.append(slice(start, stop, idx_slice.step))
+            
+            # Skip if no intersection
+            if any(s.start >= s.stop for s in intersected):
+                continue
+            
+            # Calculate indices within the cached window output
+            window_local_indices = tuple(
+                slice((s.start - w.start), (s.stop - w.start), s.step)
+                for s, w in zip(intersected, window_bounds)
+            )
+            
+            # Calculate indices within the output tensor
+            output_indices = tuple(
+                slice((s.start - n.start) // (s.step or 1), 
+                      (s.stop - n.start + (s.step or 1) - 1) // (s.step or 1))
+                for s, n in zip(intersected, indices)
+            )
+            
+            output_tensor[output_indices] = cached_output[window_local_indices]
+            
+        if collapse_dims:
+            target_shape = tuple(s for i, s in enumerate(output_shape) if i not in collapse_dims)
+            return output_tensor.reshape(target_shape)
+        return output_tensor
             
     def __setitem__(self, indices: tuple[int|slice, ...], value: torch.Tensor):
         """Set a slice of the tensor.
+        
+        .. deprecated::
+            __setitem__ is deprecated and will be removed in a future version.
         
         Args:
             indices: Tuple of indices/slices to set. Can include integers, slices, and ellipsis.
@@ -521,20 +640,16 @@ class InfiniteTensor:
                   
         Raises:
             ValueError: If the value shape does not match the indexed shape.
-            
-        Examples:
-            # Set a single value
-            tensor[0, 0, 0] = 1.0
-            
-            # Set a slice
-            tensor[0:10, 0:10, 0:10] = torch.ones(10, 10, 10)
-            
-            # Use ellipsis to fill in remaining dimensions 
-            tensor[0, ...] = torch.ones(10, 10, 10) # When tensor is 4D
-            
-            # Mix integers and slices
-            tensor[0, :, 0:10] = torch.ones(5, 10)
+            InfiniteTensorError: If using direct caching (not supported).
         """
+        warnings.warn(
+            "__setitem__ is deprecated and will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        if self._cache_method == 'direct':
+            raise InfiniteTensorError("__setitem__ is not supported with cache_method='direct'")
+        
         indices, collapse_dims = standardize_indices(self.shape, indices)
         tile_ranges = [range(s.start, s.stop) for s in self._pixel_slices_to_tile_ranges(indices)]
         
@@ -624,7 +739,7 @@ class InfiniteTensor:
         )
         self._apply_f(all_indices)
 
-    def _apply_f(self, window_indices: Iterable[tuple[int, ...]]) -> torch.Tensor:
+    def _apply_f(self, window_indices: Iterable[tuple[int, ...]]):
         """Apply the generating function to a specific window.
         
         This method orchestrates the application of the user-provided function to
@@ -635,21 +750,28 @@ class InfiniteTensor:
             window_index: N-dimensional index of the window in window space
             
         Returns:
-            None (results are stored in tiles via _add_op)
+            None (results are stored in tiles via _add_op or cached directly)
             
         Internal Process:
             1. Check if window is already processed (skip if so)
             2. Prepare arguments by slicing dependent tensors using their windows
             3. Call user function with window context and prepared arguments
             4. Validate output shape matches expected window shape
-            5. Accumulate result into tiles using _add_op
+            5. For indirect caching: accumulate result into tiles using _add_op
+               For direct caching: cache the output directly
             6. Mark dependencies as processed for cleanup tracking
         """
         valid_window_indices = set()
         for window_index in window_indices:
-            if self._store.is_window_processed_for(self._uuid, window_index):
-                logger.debug(f"Window {window_index} already processed, skipping")
-                continue
+            # For direct caching, check the window cache; for indirect, check the store
+            if self._cache_method == 'direct':
+                if window_index in self._window_cache:
+                    logger.debug(f"Window {window_index} already cached, skipping")
+                    continue
+            else:
+                if self._store.is_window_processed_for(self._uuid, window_index):
+                    logger.debug(f"Window {window_index} already processed, skipping")
+                    continue
             
             valid_window_indices.add(window_index)
         valid_window_indices = list(valid_window_indices)
@@ -677,10 +799,13 @@ class InfiniteTensor:
                 if tuple(output.shape) != tuple(expected_shape):
                     raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
                 
-                self._add_op(self.output_window.get_bounds(window_index), output)
+                if self._cache_method == 'direct':
+                    self._cache_window_output(window_index, output)
+                else:
+                    self._add_op(self.output_window.get_bounds(window_index), output)
+                    self._store.mark_window_processed_for(self._uuid, window_index)
             
                 logger.debug(f"Processed window {window_index}")
-                self._store.mark_window_processed_for(self._uuid, window_index)
         else:
             def apply_batch(batch_window_indices: list[tuple[int, ...]]):
                 args = [[] for _ in range(len(self.args))]
@@ -700,10 +825,13 @@ class InfiniteTensor:
                     if tuple(output.shape) != tuple(expected_shape):
                         raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
                     
-                    self._add_op(self.output_window.get_bounds(window_index), output)
+                    if self._cache_method == 'direct':
+                        self._cache_window_output(window_index, output)
+                    else:
+                        self._add_op(self.output_window.get_bounds(window_index), output)
+                        self._store.mark_window_processed_for(self._uuid, window_index)
                 
                     logger.debug(f"Processed window {window_index}")
-                    self._store.mark_window_processed_for(self._uuid, window_index)
                 
             batched_window_indices = []
             for window_index in valid_window_indices:
@@ -762,6 +890,8 @@ class InfiniteTensor:
             'args_windows': [window_to_dict(w) for w in self.args_windows],
             'output_window': self.output_window.to_dict(),
             'tile_shape': list(self.tile_shape),
-            'tile_bytes': int(self.tile_bytes)
+            'tile_bytes': int(self.tile_bytes),
+            'cache_method': self.cache_method,
+            'cache_limit': self.cache_limit,
         }
         
