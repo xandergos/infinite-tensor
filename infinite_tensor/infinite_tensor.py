@@ -14,10 +14,10 @@ from infinite_tensor.utils import standardize_indices
 # COORDINATE SYSTEM DEFINITIONS:
 # pixel space - Pixel space with all dimensions included (raw tensor coordinates)
 # window space - Each point is a window of pixels (used for sliding window operations)
-# tile space - Each point is a tile of pixels (internal chunking for memory management)
+# tile space - Each point is a tile of pixels (internal tiling for memory management)
 
 # CONSTANTS
-DEFAULT_CHUNK_SIZE = 512
+DEFAULT_TILE_SIZE = 512
 DEFAULT_DTYPE = torch.float32
 DEFAULT_CACHE_METHOD = 'indirect'
 DEFAULT_CACHE_LIMIT_BYTES = 10 * 1024 * 1024  # 10MB
@@ -77,18 +77,18 @@ def _validate_shape(shape: tuple) -> None:
         if dim is not None and (not isinstance(dim, int) or dim <= 0):
             raise ValidationError(f"Dimension {i} must be None or positive integer, got {dim}")
 
-def _validate_chunk_size(chunk_size: Union[int, tuple], infinite_dims: int) -> None:
-    """Validate chunk size parameter."""
-    if isinstance(chunk_size, int):
-        if chunk_size <= 0:
-            raise ValidationError(f"Chunk size must be positive, got {chunk_size}")
-    elif isinstance(chunk_size, tuple):
-        if len(chunk_size) != infinite_dims:
-            raise ValidationError(f"Chunk size tuple length {len(chunk_size)} must match infinite dimensions {infinite_dims}")
-        if any(c <= 0 for c in chunk_size):
-            raise ValidationError(f"All chunk sizes must be positive, got {chunk_size}")
+def _validate_tile_size(tile_size: Union[int, tuple], infinite_dims: int) -> None:
+    """Validate tile size parameter."""
+    if isinstance(tile_size, int):
+        if tile_size <= 0:
+            raise ValidationError(f"Tile size must be positive, got {tile_size}")
+    elif isinstance(tile_size, tuple):
+        if len(tile_size) != infinite_dims:
+            raise ValidationError(f"Tile size tuple length {len(tile_size)} must match infinite dimensions {infinite_dims}")
+        if any(c <= 0 for c in tile_size):
+            raise ValidationError(f"All tile sizes must be positive, got {tile_size}")
     else:
-        raise ValidationError(f"Chunk size must be int or tuple, got {type(chunk_size)}")
+        raise ValidationError(f"Tile size must be int or tuple, got {type(tile_size)}")
 
 def _validate_function(f: Callable) -> None:
     """Validate the generating function."""
@@ -141,7 +141,7 @@ def _validate_tensor_windows(
 
 @dataclass
 class InfinityTensorTile:
-    """A single tile storing a chunk of tensor data."""
+    """A single tile storing tensor data."""
 
     values: torch.Tensor
 
@@ -167,7 +167,7 @@ class InfiniteTensor:
                  output_window: TensorWindow,
                  args: tuple = None,
                  args_windows = None,
-                 chunk_size: Union[int, tuple[int, ...]] = DEFAULT_CHUNK_SIZE,
+                 tile_size: Union[int, tuple[int, ...]] = DEFAULT_TILE_SIZE,
                  dtype: torch.dtype = DEFAULT_DTYPE,
                  tile_store: Optional[TileStore] = None,
                  tensor_id: Optional[Any] = None,
@@ -177,7 +177,7 @@ class InfiniteTensor:
                  _created_via_store: bool = False):
         """Initialize an InfiniteTensor.
 
-        An InfiniteTensor represents a theoretically infinite tensor that is processed in chunks.
+        An InfiniteTensor represents a theoretically infinite tensor that is processed in tiles.
         Operations can be performed on the tensor in a sliding window manner without loading
         the entire tensor into memory.
 
@@ -192,9 +192,9 @@ class InfiniteTensor:
                The function signature should be f(ctx, *args), where ctx is the index of the window that is being processed.
             args: Positional arguments to pass to the function f. All must be InfiniteTensor if provided.
             args_windows: Optional positional argument windows specific to window processing.
-            chunk_size: Size of each chunk. Can be an integer for uniform chunk size, or tuple of integers to specify a different chunk size for each dimension.
-                        The number of 'None' values in 'shape' must match the number of dimensions in 'chunk_size' if it is a tuple.
-                        Ignored when cache_method='direct'.
+            tile_size: Size of each tile. Can be an integer for uniform tile size, or tuple of integers to specify a different tile size for each dimension.
+                       The number of 'None' values in 'shape' must match the number of dimensions in 'tile_size' if it is a tuple.
+                       Ignored when cache_method='direct'.
             dtype: PyTorch data type for the tensor (default: torch.float32)
             batch_size: Number of tensors to batch together. If None, no batching is done.
             cache_method: Caching strategy - 'indirect' (default) stores tiles, 'direct' caches window outputs.
@@ -211,7 +211,7 @@ class InfiniteTensor:
         
         infinite_dims = sum(1 for dim in shape if dim is None)
         if cache_method == 'indirect':
-            _validate_chunk_size(chunk_size, infinite_dims)
+            _validate_tile_size(tile_size, infinite_dims)
         _validate_window_args(args or (), args_windows)
         
         # Setup store and ID
@@ -228,18 +228,18 @@ class InfiniteTensor:
         # Validate window dimensionality against tensors
         _validate_tensor_windows(shape, output_window, normalized_args, normalized_args_windows)
 
-        # Compute chunk size tuple across infinite dims
-        if isinstance(chunk_size, int):
-            chunk_tuple = (chunk_size,) * infinite_dims
+        # Compute tile size tuple across infinite dims
+        if isinstance(tile_size, int):
+            tile_size_tuple = (tile_size,) * infinite_dims
         else:
-            chunk_tuple = chunk_size
+            tile_size_tuple = tile_size
 
         # Compute tile shape
         tile_shape_list = []
         i = 0
         for dim in shape:
             if dim is None:
-                tile_shape_list.append(chunk_tuple[i])
+                tile_shape_list.append(tile_size_tuple[i])
                 i += 1
             else:
                 tile_shape_list.append(dim)
@@ -259,7 +259,7 @@ class InfiniteTensor:
 
         # Inline metadata on this instance
         self._shape = shape
-        self._chunk_size = chunk_tuple
+        self._tile_size = tile_size_tuple
         self._dtype = dtype
         self._f = f
         self._args = arg_ids
@@ -289,8 +289,8 @@ class InfiniteTensor:
 
     # Expose meta fields as properties for internal access via self._meta()
     @property
-    def chunk_size(self) -> tuple[int, ...]:
-        return self._chunk_size
+    def tile_size(self) -> tuple[int, ...]:
+        return self._tile_size
 
     @property
     def dtype(self) -> torch.dtype:
@@ -394,15 +394,15 @@ class InfiniteTensor:
             Tuple of slices indicating which tiles are needed for each infinite dimension
             
         Example:
-            If chunk_size is 512 and we want pixels [100:1500], this returns
+            If tile_size is 512 and we want pixels [100:1500], this returns
             slice(0, 3) since we need tiles 0, 1, and 2 to cover that pixel range.
         """
         tile_ranges = []
         i = 0
         for j, pixel_range in enumerate(slices):
             if self.shape[j] is None:
-                start = None if pixel_range.start is None else pixel_range.start // self.chunk_size[i]
-                stop = None if pixel_range.stop is None else (pixel_range.stop - 1) // self.chunk_size[i] + 1
+                start = None if pixel_range.start is None else pixel_range.start // self.tile_size[i]
+                stop = None if pixel_range.stop is None else (pixel_range.stop - 1) // self.tile_size[i] + 1
                 
                 tile_ranges.append(slice(start, stop))
                 i += 1
@@ -433,8 +433,8 @@ class InfiniteTensor:
         for i, s in enumerate(slices):
             if self.shape[i] is None:
                 # Calculate tile boundaries
-                tile_start = tile_idx[infinite_dim] * self.chunk_size[infinite_dim]
-                tile_end = (tile_idx[infinite_dim] + 1) * self.chunk_size[infinite_dim]
+                tile_start = tile_idx[infinite_dim] * self.tile_size[infinite_dim]
+                tile_end = (tile_idx[infinite_dim] + 1) * self.tile_size[infinite_dim]
                 
                 # Adjust start to align with step
                 start = max(s.start, tile_start)
@@ -472,15 +472,15 @@ class InfiniteTensor:
             Tuple of slices with coordinates translated to be relative to tile origin
             
         Example:
-            If tile_idx=(1,) and chunk_size=(512,), then pixel slice [600:700]
+            If tile_idx=(1,) and tile_size=(512,), then pixel slice [600:700]
             becomes tile-local slice [88:188] (600-512:700-512)
         """
         infinite_dim = 0
         output = []
         for i, s in enumerate(slices):
             if self.shape[i] is None:
-                output.append(slice(s.start - tile_idx[infinite_dim] * self.chunk_size[infinite_dim],
-                                    s.stop - tile_idx[infinite_dim] * self.chunk_size[infinite_dim],
+                output.append(slice(s.start - tile_idx[infinite_dim] * self.tile_size[infinite_dim],
+                                    s.stop - tile_idx[infinite_dim] * self.tile_size[infinite_dim],
                                     s.step))
                 infinite_dim += 1
             else:
@@ -824,15 +824,15 @@ class InfiniteTensor:
             Tuple of slices defining the pixel boundaries covered by this tile
             
         Example:
-            For tile_index=(1, 2) with chunk_size=(512, 512), returns
+            For tile_index=(1, 2) with tile_size=(512, 512), returns
             (slice(512, 1024), slice(1024, 1536)) for the pixel bounds
         """
         tile_slices = []
         infinite_dim = 0
         for i, dim in enumerate(self.shape):
             if dim is None:
-                start = tile_index[infinite_dim] * self.chunk_size[infinite_dim]
-                stop = (tile_index[infinite_dim] + 1) * self.chunk_size[infinite_dim]
+                start = tile_index[infinite_dim] * self.tile_size[infinite_dim]
+                stop = (tile_index[infinite_dim] + 1) * self.tile_size[infinite_dim]
                 tile_slices.append(slice(start, stop))
                 infinite_dim += 1
             else:
@@ -852,7 +852,7 @@ class InfiniteTensor:
 
         return {
             'shape': list(self.shape),
-            'chunk_size': list(self.chunk_size),
+            'tile_size': list(self.tile_size),
             'dtype': _dtype_to_str(self.dtype),
             'args': [str(a) for a in self.args],
             'args_windows': [window_to_dict(w) for w in self.args_windows],

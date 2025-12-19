@@ -13,7 +13,7 @@ pip install infinite-tensor
 
 An Infinite Tensor is a tool that lets you work with data that has one or more unbounded (infinite) dimensions. Instead of loading all data into memory at once, it:
 - Loads only the parts you need, when you need them
-- Processes data in manageable chunks (windows)
+- Processes data in manageable windows
 
 It works like a convolution, but supporting arbitrary functions, and acting on infinitely large images.
 
@@ -59,7 +59,7 @@ tensor = tile_store.get_or_create(
     shape=(None, None),         # None means infinite dimension
     f=your_processing_function, # A function that takes the index of the current output window as input: e.g (0, 0)
     output_window=window,
-    chunk_size=512,             # internal tile size (optional)
+    tile_size=512,              # internal tile size (optional)
 )
 ```
 

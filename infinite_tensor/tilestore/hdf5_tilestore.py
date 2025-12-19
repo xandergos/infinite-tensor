@@ -367,7 +367,7 @@ class HDF5TileStore(TileStore):
         
         # Deserialize metadata
         shape = tuple(None if x is None else int(x) for x in meta['shape'])
-        chunk_size = tuple(int(x) for x in meta['chunk_size'])
+        tile_size = tuple(int(x) for x in meta.get('tile_size', meta.get('chunk_size')))
         dtype = _str_to_dtype(meta['dtype'])
         
         # Use stored cache_method/cache_limit if available, otherwise use defaults
@@ -390,7 +390,7 @@ class HDF5TileStore(TileStore):
             output_window=output_window,
             args=args,
             args_windows=args_windows,
-            chunk_size=chunk_size,
+            tile_size=tile_size,
             dtype=dtype,
             tile_store=self,
             tensor_id=tensor_id,
@@ -667,7 +667,7 @@ class HDF5TileStore(TileStore):
         output_window,
         args: tuple = None,
         args_windows=None,
-        chunk_size: int | tuple[int, ...] = 512,
+        tile_size: int | tuple[int, ...] = 512,
         dtype=None,
         batch_size: int | None = None,
         cache_method: str = 'indirect',
@@ -682,7 +682,7 @@ class HDF5TileStore(TileStore):
             output_window: Output window specification
             args: Argument tensors
             args_windows: Argument window specifications
-            chunk_size: Tile size
+            tile_size: Tile size
             dtype: Data type
             cache_method: Caching strategy - 'indirect' (default) stores tiles, 
                          'direct' caches window outputs directly.
@@ -722,7 +722,7 @@ class HDF5TileStore(TileStore):
             output_window,
             args=args,
             args_windows=args_windows,
-            chunk_size=chunk_size,
+            tile_size=tile_size,
             dtype=(dtype or DEFAULT_DTYPE),
             tile_store=self,
             tensor_id=tid_str,

@@ -1,7 +1,7 @@
 """Tile storage backends for infinite tensor data.
 
 This module provides the storage abstraction layer for InfinityTensor tiles.
-Tiles are chunks of tensor data that fit in memory, and the tile store manages
+Tiles are sections of tensor data that fit in memory, and the tile store manages
 their lifecycle, retrieval, and cleanup.
 
 The abstract TileStore interface allows for different storage strategies:
@@ -71,7 +71,7 @@ class TileStore(abc.ABC):
                       output_window,
                       args: tuple = None,
                       args_windows = None,
-                      chunk_size: int | tuple[int, ...] = 512,
+                      tile_size: int | tuple[int, ...] = 512,
                       dtype=None,
                       batch_size: int | None = None,
                       cache_method: str = 'indirect',
@@ -207,7 +207,7 @@ class MemoryTileStore(TileStore):
                       output_window,
                       args: tuple = None,
                       args_windows = None,
-                      chunk_size: int | tuple[int, ...] = 512,
+                      tile_size: int | tuple[int, ...] = 512,
                       dtype=None,
                       batch_size: int | None = None,
                       cache_method: str = 'indirect',
@@ -231,7 +231,7 @@ class MemoryTileStore(TileStore):
             output_window,
             args=args,
             args_windows=args_windows,
-            chunk_size=chunk_size,
+            tile_size=tile_size,
             dtype=(dtype or DEFAULT_DTYPE),
             tile_store=self,
             tensor_id=tid_str,
