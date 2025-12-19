@@ -1,4 +1,3 @@
-from collections import OrderedDict
 from dataclasses import dataclass
 import logging
 from typing import Any, Callable, Iterable, Literal, Optional, Union
@@ -272,10 +271,6 @@ class InfiniteTensor:
         self._cache_method = cache_method
         self._cache_limit = cache_limit
         
-        # LRU cache for direct caching (window_index -> output tensor)
-        self._window_cache: OrderedDict[tuple[int, ...], torch.Tensor] = OrderedDict()
-        self._cache_size_bytes: int = 0
-        
         # Register this tensor instance in the store
         self._store.register_tensor_meta(self._uuid, self.to_json())
     
@@ -336,33 +331,6 @@ class InfiniteTensor:
     @property
     def cache_limit(self) -> Optional[int]:
         return self._cache_limit
-
-    def _tensor_size_bytes(self, t: torch.Tensor) -> int:
-        """Calculate the size of a tensor in bytes."""
-        return t.numel() * t.element_size()
-
-    def _cache_window_output(self, window_index: tuple[int, ...], output: torch.Tensor) -> None:
-        """Cache a window output with LRU eviction based on bytes for direct caching."""
-        if window_index in self._window_cache:
-            self._window_cache.move_to_end(window_index)
-            return
-        
-        output_bytes = self._tensor_size_bytes(output)
-        self._window_cache[window_index] = output
-        self._cache_size_bytes += output_bytes
-        
-        # Evict oldest entries until under limit (if limit is set)
-        if self._cache_limit is not None:
-            while self._cache_size_bytes > self._cache_limit and len(self._window_cache) > 1:
-                _, evicted = self._window_cache.popitem(last=False)
-                self._cache_size_bytes -= self._tensor_size_bytes(evicted)
-
-    def _get_cached_window_output(self, window_index: tuple[int, ...]) -> Optional[torch.Tensor]:
-        """Get a cached window output, marking as recently used."""
-        if window_index in self._window_cache:
-            self._window_cache.move_to_end(window_index)
-            return self._window_cache[window_index]
-        return None
 
     def _calculate_indexed_shape(self, indices: tuple[slice, ...]) -> list[int]:
         """Calculate the shape of the result when indexing with given indices.
@@ -588,7 +556,7 @@ class InfiniteTensor:
         
         output_tensor = torch.empty(output_shape, dtype=self.dtype)
         for window_index in itertools.product(*window_ranges):
-            cached_output = self._get_cached_window_output(window_index)
+            cached_output = self._store.get_cached_window_for(self._uuid, window_index)
             if cached_output is None:
                 raise TileAccessError(f"Window {window_index} not found in cache")
             
@@ -765,7 +733,7 @@ class InfiniteTensor:
         for window_index in window_indices:
             # For direct caching, check the window cache; for indirect, check the store
             if self._cache_method == 'direct':
-                if window_index in self._window_cache:
+                if self._store.is_window_cached_for(self._uuid, window_index):
                     logger.debug(f"Window {window_index} already cached, skipping")
                     continue
             else:
@@ -800,7 +768,7 @@ class InfiniteTensor:
                     raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
                 
                 if self._cache_method == 'direct':
-                    self._cache_window_output(window_index, output)
+                    self._store.cache_window_for(self._uuid, window_index, output, self._cache_limit)
                 else:
                     self._add_op(self.output_window.get_bounds(window_index), output)
                     self._store.mark_window_processed_for(self._uuid, window_index)
@@ -826,7 +794,7 @@ class InfiniteTensor:
                         raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
                     
                     if self._cache_method == 'direct':
-                        self._cache_window_output(window_index, output)
+                        self._store.cache_window_for(self._uuid, window_index, output, self._cache_limit)
                     else:
                         self._add_op(self.output_window.get_bounds(window_index), output)
                         self._store.mark_window_processed_for(self._uuid, window_index)

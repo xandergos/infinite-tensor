@@ -12,7 +12,8 @@ The abstract TileStore interface allows for different storage strategies:
 import abc
 import uuid
 import numpy as np
-from typing import Dict, Any, Tuple, Iterable, Set
+from collections import OrderedDict
+from typing import Dict, Any, Optional, Tuple, Iterable, Set
 
 class TileStore(abc.ABC):
     """Abstract base class for tile storage backends.
@@ -47,6 +48,19 @@ class TileStore(abc.ABC):
         raise NotImplementedError
 
     def iter_tile_keys_for(self, tensor_id: str) -> Iterable[tuple[int, ...]]:
+        raise NotImplementedError
+
+    # Window cache operations for direct caching
+    def cache_window_for(self, tensor_id: str, window_index: tuple[int, ...], output, cache_limit: Optional[int]) -> None:
+        """Cache a window output with LRU eviction based on bytes."""
+        raise NotImplementedError
+
+    def get_cached_window_for(self, tensor_id: str, window_index: tuple[int, ...]):
+        """Get a cached window output, marking as recently used. Returns None if not cached."""
+        raise NotImplementedError
+
+    def is_window_cached_for(self, tensor_id: str, window_index: tuple[int, ...]) -> bool:
+        """Check if a window is in the cache."""
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -91,10 +105,15 @@ class MemoryTileStore(TileStore):
         self._tensor_store: Dict[str, Any] = {}
         self._tensor_meta: Dict[str, Any] = {}
         self._processed_windows_by_tensor: Dict[str, Set[Tuple[int, ...]]] = {}
+        # Window cache for direct caching (per-tensor LRU cache)
+        self._window_cache: Dict[str, OrderedDict] = {}
+        self._window_cache_size: Dict[str, int] = {}
 
     def register_tensor_meta(self, tensor_id: str, meta: dict) -> None:
         self._tensor_meta[tensor_id] = meta
         self._processed_windows_by_tensor[tensor_id] = set()
+        self._window_cache[tensor_id] = OrderedDict()
+        self._window_cache_size[tensor_id] = 0
 
     def get_tensor_meta(self, tensor_id: str) -> dict:
         return self._tensor_meta[tensor_id]
@@ -106,6 +125,11 @@ class MemoryTileStore(TileStore):
         # Remove windows
         if tensor_id in self._processed_windows_by_tensor:
             del self._processed_windows_by_tensor[tensor_id]
+        # Remove window cache
+        if tensor_id in self._window_cache:
+            del self._window_cache[tensor_id]
+        if tensor_id in self._window_cache_size:
+            del self._window_cache_size[tensor_id]
         # Remove metadata
         if tensor_id in self._tensor_meta:
             del self._tensor_meta[tensor_id]
@@ -134,6 +158,47 @@ class MemoryTileStore(TileStore):
 
     def mark_window_processed_for(self, tensor_id: str, window_index: tuple[int, ...]) -> None:
         self._processed_windows_by_tensor.setdefault(tensor_id, set()).add(window_index)
+
+    def _tensor_size_bytes(self, t) -> int:
+        """Calculate the size of a tensor in bytes."""
+        return t.numel() * t.element_size()
+
+    def cache_window_for(self, tensor_id: str, window_index: tuple[int, ...], output, cache_limit: Optional[int]) -> None:
+        """Cache a window output with LRU eviction based on bytes."""
+        cache = self._window_cache.get(tensor_id)
+        if cache is None:
+            self._window_cache[tensor_id] = OrderedDict()
+            self._window_cache_size[tensor_id] = 0
+            cache = self._window_cache[tensor_id]
+        
+        if window_index in cache:
+            cache.move_to_end(window_index)
+            return
+        
+        output_bytes = self._tensor_size_bytes(output)
+        cache[window_index] = output
+        self._window_cache_size[tensor_id] += output_bytes
+        
+        # Evict oldest entries until under limit (if limit is set)
+        if cache_limit is not None:
+            while self._window_cache_size[tensor_id] > cache_limit and len(cache) > 1:
+                _, evicted = cache.popitem(last=False)
+                self._window_cache_size[tensor_id] -= self._tensor_size_bytes(evicted)
+
+    def get_cached_window_for(self, tensor_id: str, window_index: tuple[int, ...]):
+        """Get a cached window output, marking as recently used."""
+        cache = self._window_cache.get(tensor_id)
+        if cache is None:
+            return None
+        if window_index in cache:
+            cache.move_to_end(window_index)
+            return cache[window_index]
+        return None
+
+    def is_window_cached_for(self, tensor_id: str, window_index: tuple[int, ...]) -> bool:
+        """Check if a window is in the cache."""
+        cache = self._window_cache.get(tensor_id)
+        return cache is not None and window_index in cache
 
     def get_or_create(self,
                       tensor_id,

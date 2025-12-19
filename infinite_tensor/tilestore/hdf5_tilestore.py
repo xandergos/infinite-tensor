@@ -93,6 +93,10 @@ class HDF5TileStore(TileStore):
         self._metadata_cache: Dict[str, dict] = {}  # Tensor metadata
         self._processed_windows_cache: Dict[str, set] = {}  # Processed windows per tensor
         
+        # Window cache for direct caching (per-tensor LRU cache, stored in memory)
+        self._window_cache: Dict[str, OrderedDict] = {}
+        self._window_cache_size: Dict[str, int] = {}
+        
         # Initialize file structure (only if not read-only)
         if self.mode != 'r':
             self._ensure_file_exists()
@@ -613,6 +617,47 @@ class HDF5TileStore(TileStore):
         pw_dataset[current_size] = encoded
         
         f.flush()
+
+    def _tensor_size_bytes(self, t) -> int:
+        """Calculate the size of a tensor in bytes."""
+        return t.numel() * t.element_size()
+
+    def cache_window_for(self, tensor_id: str, window_index: tuple[int, ...], output, cache_limit: Optional[int]) -> None:
+        """Cache a window output with LRU eviction based on bytes (stored in memory)."""
+        if tensor_id not in self._window_cache:
+            self._window_cache[tensor_id] = OrderedDict()
+            self._window_cache_size[tensor_id] = 0
+        
+        cache = self._window_cache[tensor_id]
+        
+        if window_index in cache:
+            cache.move_to_end(window_index)
+            return
+        
+        output_bytes = self._tensor_size_bytes(output)
+        cache[window_index] = output
+        self._window_cache_size[tensor_id] += output_bytes
+        
+        # Evict oldest entries until under limit (if limit is set)
+        if cache_limit is not None:
+            while self._window_cache_size[tensor_id] > cache_limit and len(cache) > 1:
+                _, evicted = cache.popitem(last=False)
+                self._window_cache_size[tensor_id] -= self._tensor_size_bytes(evicted)
+
+    def get_cached_window_for(self, tensor_id: str, window_index: tuple[int, ...]):
+        """Get a cached window output, marking as recently used."""
+        cache = self._window_cache.get(tensor_id)
+        if cache is None:
+            return None
+        if window_index in cache:
+            cache.move_to_end(window_index)
+            return cache[window_index]
+        return None
+
+    def is_window_cached_for(self, tensor_id: str, window_index: tuple[int, ...]) -> bool:
+        """Check if a window is in the cache."""
+        cache = self._window_cache.get(tensor_id)
+        return cache is not None and window_index in cache
     
     def get_or_create(
         self,
