@@ -510,19 +510,29 @@ class InfiniteTensor:
             # Mix integers and slices
             tensor[0, :, 0:10]
         """
+        pending_evictions: set[tuple[str, int | None]] = set()
+        result = self._getitem_noevict(indices, pending_evictions)
+        for tensor_id, cache_limit in pending_evictions:
+            self._store.evict_cache_for(tensor_id, cache_limit)
+        return result
+    
+    def _getitem_noevict(self, indices: tuple[int|slice, ...],
+                         pending_evictions: set[tuple[str, int | None]]) -> torch.Tensor:
+        """Internal getitem that defers eviction until the outermost __getitem__ completes."""
+        if self._cache_method == 'direct':
+            pending_evictions.add((self._uuid, self._cache_limit))
+        
         indices, collapse_dims = standardize_indices(self.shape, indices)
         
         logger.debug(f"Accessing tensor slice with indices: {indices}")
-        self._apply_f_range([indices])
+        self._apply_f_range([indices], pending_evictions)
         
         # Calculate output shape
         output_shape = self._calculate_indexed_shape(indices)
         logger.debug(f"Calculated output shape: {output_shape}")
         
         if self._cache_method == 'direct':
-            result = self._getitem_direct(indices, output_shape, collapse_dims)
-            self._store.evict_cache_for(self._uuid, self._cache_limit)
-            return result
+            return self._getitem_direct(indices, output_shape, collapse_dims)
         else:
             return self._getitem_indirect(indices, output_shape, collapse_dims)
     
@@ -685,7 +695,8 @@ class InfiniteTensor:
             tile.values[tile_space_indices] += value[value_indices]
             self._store.set_tile_for(self._uuid, tile_index, tile)
 
-    def _apply_f_range(self, pixel_range: Iterable[tuple[slice, ...]]):
+    def _apply_f_range(self, pixel_range: Iterable[tuple[slice, ...]],
+                       pending_evictions: set[tuple[str, int | None]]):
         """Apply the generating function to all windows intersecting a pixel range.
         
         This is the core orchestration method that determines which windows need
@@ -694,6 +705,7 @@ class InfiniteTensor:
         
         Args:
             pixel_range: Tuple of slices defining the pixel region that needs data
+            pending_evictions: Set to accumulate (tensor_id, cache_limit) for deferred eviction
             
         Internal Process:
             1. Calculate which windows intersect the requested pixel range
@@ -708,9 +720,10 @@ class InfiniteTensor:
             )])
             for sub_pixel_range in pixel_range
         )
-        self._apply_f(all_indices)
+        self._apply_f(all_indices, pending_evictions)
 
-    def _apply_f(self, window_indices: Iterable[tuple[int, ...]]):
+    def _apply_f(self, window_indices: Iterable[tuple[int, ...]],
+                 pending_evictions: set[tuple[str, int | None]]):
         """Apply the generating function to a specific window.
         
         This method orchestrates the application of the user-provided function to
@@ -719,6 +732,7 @@ class InfiniteTensor:
         
         Args:
             window_index: N-dimensional index of the window in window space
+            pending_evictions: Set to accumulate (tensor_id, cache_limit) for deferred eviction
             
         Returns:
             None (results are stored in tiles via _add_op or cached directly)
@@ -773,7 +787,7 @@ class InfiniteTensor:
             upstream = self._store.get_tensor(self.args[i])
             arg_window = self.args_windows[i]
             pixel_ranges = [arg_window.get_bounds(window_index) for window_index in valid_window_indices]
-            upstream._apply_f_range(pixel_ranges)
+            upstream._apply_f_range(pixel_ranges, pending_evictions)
         
         if self.batch_size is None:
             for window_index in valid_window_indices:
@@ -782,7 +796,7 @@ class InfiniteTensor:
                 for i, arg_window in enumerate(self.args_windows):
                     upstream = self._store.get_tensor(self.args[i])
                     arg_window = self.args_windows[i]
-                    args.append(upstream[arg_window.get_bounds(window_index)])
+                    args.append(upstream._getitem_noevict(arg_window.get_bounds(window_index), pending_evictions))
                 with torch.no_grad():
                     output = self.f(window_index, *args)
                 
@@ -806,7 +820,7 @@ class InfiniteTensor:
                     for i, arg_window in enumerate(self.args_windows):
                         upstream = self._store.get_tensor(self.args[i])
                         arg_window = self.args_windows[i]
-                        args[i].append(upstream[arg_window.get_bounds(window_index)])
+                        args[i].append(upstream._getitem_noevict(arg_window.get_bounds(window_index), pending_evictions))
                 
                 with torch.no_grad():
                     outputs = self.f(batch_window_indices, *args)
