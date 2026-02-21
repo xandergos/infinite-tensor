@@ -672,7 +672,11 @@ class HDF5TileStore(TileStore):
         """Check if a window is in the cache."""
         cache = self._window_cache.get(tensor_id)
         return cache is not None and window_index in cache
-    
+
+    def clear_direct_caches(self) -> None:
+        self._window_cache.clear()
+        self._window_cache_size.clear()
+
     def get_or_create(
         self,
         tensor_id,
