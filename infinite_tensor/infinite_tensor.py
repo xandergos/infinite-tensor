@@ -105,8 +105,8 @@ def _validate_cache_method(cache_method: str, cache_limit: Optional[int]) -> Non
     if cache_method not in ('indirect', 'direct'):
         raise ValidationError(f"cache_method must be 'indirect' or 'direct', got '{cache_method}'")
     if cache_method == 'direct' and cache_limit is not None:
-        if not isinstance(cache_limit, int) or cache_limit <= 0:
-            raise ValidationError(f"cache_limit must be a positive integer or None, got {cache_limit}")
+        if not isinstance(cache_limit, int) or cache_limit < 0:
+            raise ValidationError(f"cache_limit must be a non-negative integer or None, got {cache_limit}")
 
 def _validate_tensor_windows(
     tensor_shape: tuple[int|None, ...],
@@ -519,7 +519,7 @@ class InfiniteTensor:
     def _getitem_noevict(self, indices: tuple[int|slice, ...],
                          pending_evictions: set[tuple[str, int | None]]) -> torch.Tensor:
         """Internal getitem that defers eviction until the outermost __getitem__ completes."""
-        if self._cache_method == 'direct':
+        if self._cache_method == 'direct' and self._cache_limit != 0:
             pending_evictions.add((self._uuid, self._cache_limit))
         
         indices, collapse_dims = standardize_indices(self.shape, indices)
@@ -571,7 +571,16 @@ class InfiniteTensor:
         for window_index in itertools.product(*window_ranges):
             cached_output = self._store.get_cached_window_for(self._uuid, window_index)
             if cached_output is None:
-                raise TileAccessError(f"Window {window_index} not found in cache")
+                if self._cache_limit == 0:
+                    args = []
+                    for i, arg_window in enumerate(self.args_windows):
+                        upstream = self._store.get_tensor(self.args[i])
+                        bounds = arg_window.get_bounds(window_index)
+                        args.append(upstream[bounds])
+                    with torch.no_grad():
+                        cached_output = self.f(window_index, *args)
+                else:
+                    raise TileAccessError(f"Window {window_index} not found in cache")
             
             # Get the pixel bounds of this window
             window_bounds = self.output_window.get_bounds(window_index)
@@ -677,7 +686,9 @@ class InfiniteTensor:
         
         # Validate and prepare value
         value = self._validate_and_prepare_value(indices, value, collapse_dims)
-            
+        if value.device.type != 'cpu':
+            raise ValidationError(DEVICE_MISMATCH_ERROR_MSG.format(actual=value.device))
+
         # Set values in tiles
         for tile_index in itertools.product(*tile_ranges):
             tile = self._store.get_tile_for(self._uuid, tile_index)
@@ -688,10 +699,6 @@ class InfiniteTensor:
             tile_space_indices = self._translate_slices(intersected_indices, tile_index)
             value_indices = tuple(slice((s.start - n.start) // s.step, (s.stop - n.start - 1) // s.step + 1)
                                 for s, n in zip(intersected_indices, indices))
-            
-            # Assert tile values and value are on same device
-            if tile.values.device != value.device:
-                raise ValueError(DEVICE_MISMATCH_ERROR_MSG.format(actual=value.device))
             tile.values[tile_space_indices] += value[value_indices]
             self._store.set_tile_for(self._uuid, tile_index, tile)
 
@@ -750,7 +757,7 @@ class InfiniteTensor:
         for window_index in window_indices:
             # For direct caching, check the window cache; for indirect, check the store
             if self._cache_method == 'direct':
-                if self._store.is_window_cached_for(self._uuid, window_index):
+                if self._cache_limit != 0 and self._store.is_window_cached_for(self._uuid, window_index):
                     logger.debug(f"Window {window_index} already cached, skipping")
                     continue
             else:
@@ -779,7 +786,7 @@ class InfiniteTensor:
                     ):
                         used_windows_by_tensor.setdefault(upstream._uuid, []).append(upstream_window)
         
-        if self._cache_method == 'direct':
+        if self._cache_method == 'direct' and self._cache_limit != 0:
             track_upstream_windows()
             
         # Pre-process arguments
@@ -806,7 +813,8 @@ class InfiniteTensor:
                     raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
                 
                 if self._cache_method == 'direct':
-                    self._store.cache_window_for(self._uuid, window_index, output)
+                    if self._cache_limit != 0:
+                        self._store.cache_window_for(self._uuid, window_index, output)
                 else:
                     self._add_op(self.output_window.get_bounds(window_index), output)
                     self._store.mark_window_processed_for(self._uuid, window_index)
@@ -832,7 +840,8 @@ class InfiniteTensor:
                         raise ShapeMismatchError(OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape))
                     
                     if self._cache_method == 'direct':
-                        self._store.cache_window_for(self._uuid, window_index, output)
+                        if self._cache_limit != 0:
+                            self._store.cache_window_for(self._uuid, window_index, output)
                     else:
                         self._add_op(self.output_window.get_bounds(window_index), output)
                         self._store.mark_window_processed_for(self._uuid, window_index)
@@ -850,7 +859,7 @@ class InfiniteTensor:
         
         # Reorder caches: first promote USED windows, then GENERATED windows
         # This ensures generated windows have highest priority (evicted last)
-        if self._cache_method == 'direct':
+        if self._cache_method == 'direct' and self._cache_limit != 0:
             for tensor_id, windows in used_windows_by_tensor.items():
                 self._store.promote_windows_for(tensor_id, windows)
             self._store.promote_windows_for(self._uuid, valid_window_indices)

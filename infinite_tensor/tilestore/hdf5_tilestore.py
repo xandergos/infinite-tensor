@@ -645,7 +645,7 @@ class HDF5TileStore(TileStore):
         cache = self._window_cache.get(tensor_id)
         if cache is None:
             return
-        while self._window_cache_size[tensor_id] > cache_limit and len(cache) > 1:
+        while self._window_cache_size[tensor_id] > cache_limit:
             _, evicted = cache.popitem(last=False)
             self._window_cache_size[tensor_id] -= self._tensor_size_bytes(evicted)
 
