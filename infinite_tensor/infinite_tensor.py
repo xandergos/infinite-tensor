@@ -525,7 +525,8 @@ class InfiniteTensor:
         indices, collapse_dims = standardize_indices(self.shape, indices)
         
         logger.debug(f"Accessing tensor slice with indices: {indices}")
-        self._apply_f_range([indices], pending_evictions)
+        if self._cache_method != 'direct' or self._cache_limit != 0:
+            self._apply_f_range([indices], pending_evictions)
         
         # Calculate output shape
         output_shape = self._calculate_indexed_shape(indices)
@@ -686,9 +687,7 @@ class InfiniteTensor:
         
         # Validate and prepare value
         value = self._validate_and_prepare_value(indices, value, collapse_dims)
-        if value.device.type != 'cpu':
-            raise ValidationError(DEVICE_MISMATCH_ERROR_MSG.format(actual=value.device))
-
+            
         # Set values in tiles
         for tile_index in itertools.product(*tile_ranges):
             tile = self._store.get_tile_for(self._uuid, tile_index)
@@ -699,6 +698,10 @@ class InfiniteTensor:
             tile_space_indices = self._translate_slices(intersected_indices, tile_index)
             value_indices = tuple(slice((s.start - n.start) // s.step, (s.stop - n.start - 1) // s.step + 1)
                                 for s, n in zip(intersected_indices, indices))
+            
+            # Assert tile values and value are on same device
+            if tile.values.device != value.device:
+                raise ValueError(DEVICE_MISMATCH_ERROR_MSG.format(actual=value.device))
             tile.values[tile_space_indices] += value[value_indices]
             self._store.set_tile_for(self._uuid, tile_index, tile)
 
