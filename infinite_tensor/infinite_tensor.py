@@ -105,8 +105,8 @@ def _validate_cache_method(cache_method: str, cache_limit: Optional[int]) -> Non
     if cache_method not in ('indirect', 'direct'):
         raise ValidationError(f"cache_method must be 'indirect' or 'direct', got '{cache_method}'")
     if cache_method == 'direct' and cache_limit is not None:
-        if not isinstance(cache_limit, int) or cache_limit <= 0:
-            raise ValidationError(f"cache_limit must be a positive integer or None, got {cache_limit}")
+        if not isinstance(cache_limit, int) or cache_limit < 0:
+            raise ValidationError(f"cache_limit must be a non-negative integer or None, got {cache_limit}")
 
 def _validate_tensor_windows(
     tensor_shape: tuple[int|None, ...],
@@ -571,6 +571,8 @@ class InfiniteTensor:
         for window_index in itertools.product(*window_ranges):
             cached_output = self._store.get_cached_window_for(self._uuid, window_index)
             if cached_output is None:
+                # _apply_f_range should have populated this window before
+                # _getitem_direct was reached; a miss here is a genuine error.
                 raise TileAccessError(f"Window {window_index} not found in cache")
             
             # Get the pixel bounds of this window
