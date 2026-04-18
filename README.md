@@ -25,15 +25,15 @@ When you slice it:
 3. Results are handed to a `TileStore`, which caches them so repeat reads are free.
 4. The store assembles the requested pixels and returns a `torch.Tensor`.
 
-Overlapping output windows are **summed** in the region they overlap. That is the only blending rule.
+Overlapping output windows are **summed** in the region they overlap by default. Pass `blend=` / `blend_init=` to `InfiniteTensor` to override — see [Custom window blending](#9-custom-window-blending).
 
 ## Key Concepts
 
-1. **`TensorWindow`**: output window specification. Fixed `size`, optional `stride` (defaults to `size`, non-overlapping) and `offset` (defaults to zeros). Your `f` must return a tensor of exactly `size`.
-2. **`InfiniteTensor`**: immutable tensor with a shape (any number of `None` dims), a deterministic `f`, a declared `dtype` and `device`, and a backing `TileStore`. Can depend on other `InfiniteTensor`s through `args` / `args_windows`.
-3. **`TileStore`**: owns the processed-window set and the storage. Pick one:
-   - `MemoryTileStore`: in-memory, single LRU cache shared by every tensor registered against it.
-   - `HDF5TileStore`: persistent, accumulates window outputs into fixed-size tiles in an HDF5 file on disk. Requires `h5py` (install via the `hdf5` extra).
+1. `**TensorWindow`**: output window specification. Fixed `size`, optional `stride` (defaults to `size`, non-overlapping) and `offset` (defaults to zeros). Your `f` must return a tensor of exactly `size`.
+2. `**InfiniteTensor`**: immutable tensor with a shape (any number of `None` dims), a deterministic `f`, a declared `dtype` and `device`, and a backing `TileStore`. Can depend on other `InfiniteTensor`s through `args` / `args_windows`.
+3. `**TileStore**`: owns the processed-window set and the storage. Pick one:
+  - `MemoryTileStore`: in-memory, single LRU cache shared by every tensor registered against it.
+  - `HDF5TileStore`: persistent, accumulates window outputs into fixed-size tiles in an HDF5 file on disk. Requires `h5py` (install via the `hdf5` extra).
 
 Subclass `PersistentTileStore` (`from infinite_tensor.tilestore.persistent import PersistentTileStore`) to add other durable backends; see [Extending with a custom persistent backend](#extending-with-a-custom-persistent-backend).
 
@@ -95,7 +95,7 @@ Either (or both) of `cache_size_bytes` / `cache_size_windows` may be `None` (def
 
 Eviction is deferred while any tensor is inside a `__getitem__` call. Upstream caches are also pinned for the duration of a downstream read, so a single operation that temporarily overruns the cache still succeeds. Once the outermost access returns, the cache trims back to its limits.
 
-`HDF5TileStore` has its own separate tile LRU; see [Persistent storage with HDF5](#9-persistent-storage-with-hdf5).
+`HDF5TileStore` has its own separate tile LRU; see [Persistent storage with HDF5](#10-persistent-storage-with-hdf5).
 
 ### 5. Clearing state
 
@@ -206,7 +206,38 @@ window = TensorWindow(
 
 For most pipelines you can leave `dimension_map=None` (the default); size/stride/offset on the output dim itself already handle fixed-size dims.
 
-### 9. Persistent storage with HDF5
+### 9. Custom window blending
+
+Overlapping windows are summed by default. Two optional `InfiniteTensor` kwargs override that:
+
+- `blend: Callable[[Tensor, Tensor], Tensor] | None` — elementwise `(existing, incoming) -> combined`. `None` (default) keeps the fast `+=` path.
+- `blend_init: float | int | None` — scalar used to fill freshly-allocated blending buffers (the read-time output tensor in `MemoryTileStore`, fresh tiles in any `PersistentTileStore` subclass). `None` (default) means zero. Non-additive blends should set this to their identity so first-touch against zero does not corrupt the result.
+
+```python
+import torch
+from infinite_tensor import InfiniteTensor, TensorWindow, MemoryTileStore
+
+def f(ctx):
+    wy, wx = ctx
+    return torch.full((64, 64), float(wy + wx))
+
+tensor = InfiniteTensor(
+    shape=(None, None),
+    f=f,
+    output_window=TensorWindow((64, 64), stride=(32, 32)),
+    tile_store=MemoryTileStore(),
+    tensor_id="max_blend_example",
+    blend=torch.maximum,
+    blend_init=float("-inf"),
+)
+result = tensor[0:128, 0:128]  # per-pixel max over every covering window
+```
+
+Both kwargs apply to `MemoryTileStore` and any `PersistentTileStore` subclass (including `HDF5TileStore`).
+
+Like `f` and `batch_size`, neither field is serialized into `to_json()`. Reopening a persistent file with a different `blend` / `blend_init` gives undefined results — stored tiles are already combined under the previous rule. Treat this as part of the same contract that says `f` must not change between sessions.
+
+### 10. Persistent storage with HDF5
 
 ```python
 from infinite_tensor import HDF5TileStore, InfiniteTensor, TensorWindow
@@ -285,18 +316,20 @@ See `infinite_tensor/tilestore/persistent.py` for the full contract (and `hdf5_t
 
 All live at `infinite_tensor` top level:
 
-| Exception | Raised when |
-|-----------|-------------|
-| `InfiniteTensorError` | base class for everything below |
-| `ValidationError` | constructor param validation, metadata mismatch on re-registration, unsupported dtype migration |
-| `ShapeMismatchError` | `f` returned a tensor whose shape differs from `TensorWindow.size` |
-| `DeviceMismatchError` | `f` returned a tensor on a different device than the tensor was declared with |
-| `DtypeMismatchError` | `f` returned a tensor with a different dtype than the tensor was declared with |
-| `TileAccessError` | internal: a tile was requested for read but never processed (indicates a store-consistency bug) |
+
+| Exception             | Raised when                                                                                     |
+| --------------------- | ----------------------------------------------------------------------------------------------- |
+| `InfiniteTensorError` | base class for everything below                                                                 |
+| `ValidationError`     | constructor param validation, metadata mismatch on re-registration, unsupported dtype migration |
+| `ShapeMismatchError`  | `f` returned a tensor whose shape differs from `TensorWindow.size`                              |
+| `DeviceMismatchError` | `f` returned a tensor on a different device than the tensor was declared with                   |
+| `DtypeMismatchError`  | `f` returned a tensor with a different dtype than the tensor was declared with                  |
+| `TileAccessError`     | internal: a tile was requested for read but never processed (indicates a store-consistency bug) |
+
 
 ## Example
 
-See [`examples/blur.py`](examples/blur.py) for a full worked example: a random-image base tensor blurred twice via two chained `InfiniteTensor`s with a padded arg window.
+See `[examples/blur.py](examples/blur.py)` for a full worked example: a random-image base tensor blurred twice via two chained `InfiniteTensor`s with a padded arg window.
 
 ## License
 

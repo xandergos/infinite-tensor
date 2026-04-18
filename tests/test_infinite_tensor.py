@@ -5,7 +5,13 @@ import uuid
 import pytest
 import torch
 
-from infinite_tensor import DtypeMismatchError, InfiniteTensor, TensorWindow
+from infinite_tensor import (
+    DtypeMismatchError,
+    InfiniteTensor,
+    TensorWindow,
+    ValidationError,
+)
+from infinite_tensor.tilestore import MemoryTileStore
 
 
 class TestInfiniteTensorBasics:
@@ -490,4 +496,153 @@ class TestSteppedSlicing:
 
         result = tensor[0:8:3, 0:8:3]
         expected = torch.arange(64, dtype=torch.float32).reshape(8, 8)[::3, ::3]
+        assert torch.equal(result, expected)
+
+
+class TestWindowBlend:
+    """Per-tensor ``blend`` / ``blend_init`` overrides on ``MemoryTileStore``."""
+
+    def _build_overlap_tensor(self, blend=None, blend_init=None):
+        """1D tensor with overlapping windows: size=4, stride=2, window i -> full(4, 10-i).
+
+        The read at ``tensor[0:8]`` is covered by windows ``i in [-1, 3]`` (an
+        unbounded left edge means window ``-1`` spans pixels ``[-2, 2)`` too).
+        Window values are ``10 - i``, so per pixel ``p`` the covering windows
+        are ``i = ceil((p - 3) / 2) .. floor(p / 2)`` with values
+        ``10 - i``.
+        """
+        window = TensorWindow((4,), stride=(2,))
+
+        def decreasing_constant(ctx):
+            (window_index,) = ctx
+            return torch.full((4,), float(10 - window_index))
+
+        return InfiniteTensor(
+            (None,),
+            decreasing_constant,
+            window,
+            tile_store=MemoryTileStore(),
+            tensor_id=uuid.uuid4(),
+            blend=blend,
+            blend_init=blend_init,
+        )
+
+    def test_max_blend_with_neg_inf_init(self):
+        """blend=torch.maximum with blend_init=-inf picks the largest covering window value."""
+        tensor = self._build_overlap_tensor(
+            blend=torch.maximum,
+            blend_init=float("-inf"),
+        )
+        result = tensor[0:8]
+        expected = torch.tensor([11.0, 11.0, 10.0, 10.0, 9.0, 9.0, 8.0, 8.0])
+        assert torch.equal(result, expected)
+
+    def test_overwrite_blend_is_last_window_wins(self):
+        """blend returning incoming makes the last window in iteration order win per pixel."""
+
+        def overwrite(existing, incoming):
+            return incoming
+
+        tensor = self._build_overlap_tensor(blend=overwrite)
+        result = tensor[0:8]
+        expected = torch.tensor([10.0, 10.0, 9.0, 9.0, 8.0, 8.0, 7.0, 7.0])
+        assert torch.equal(result, expected)
+
+    def test_default_blend_still_sums(self):
+        """blend=None / blend_init=None preserves the existing sum semantics."""
+        tensor = self._build_overlap_tensor()
+        result = tensor[0:8]
+        expected = torch.tensor([21.0, 21.0, 19.0, 19.0, 17.0, 17.0, 15.0, 15.0])
+        assert torch.equal(result, expected)
+
+    def test_blend_init_alone_fills_untouched_regions(self):
+        """With no blend but blend_init set, non-window gaps in a read keep the init value."""
+        window = TensorWindow((4,), stride=(4,))
+
+        def ones(ctx):
+            return torch.ones((4,))
+
+        tensor = InfiniteTensor(
+            (None,),
+            ones,
+            window,
+            tile_store=MemoryTileStore(),
+            tensor_id=uuid.uuid4(),
+            blend_init=7.0,
+        )
+        result = tensor[0:4]
+        assert torch.equal(result, torch.ones(4) + 7.0)
+
+    def test_non_callable_blend_raises(self):
+        """blend must be callable or None."""
+        with pytest.raises(ValidationError, match="blend must be callable"):
+            InfiniteTensor(
+                (None,),
+                lambda ctx: torch.zeros(4),
+                TensorWindow((4,)),
+                blend=5,
+                tensor_id=uuid.uuid4(),
+            )
+
+    def test_bool_blend_init_raises(self):
+        """blend_init rejects bool even though it is an int subclass."""
+        with pytest.raises(ValidationError, match="blend_init must be"):
+            InfiniteTensor(
+                (None,),
+                lambda ctx: torch.zeros(4),
+                TensorWindow((4,)),
+                blend_init=True,
+                tensor_id=uuid.uuid4(),
+            )
+
+    def test_non_numeric_blend_init_raises(self):
+        """blend_init rejects non-numeric scalars."""
+        with pytest.raises(ValidationError, match="blend_init must be"):
+            InfiniteTensor(
+                (None,),
+                lambda ctx: torch.zeros(4),
+                TensorWindow((4,)),
+                blend_init="zero",
+                tensor_id=uuid.uuid4(),
+            )
+
+
+class TestPersistentWindowBlend:
+    """Blend overrides must also flow through ``PersistentTileStore`` / HDF5."""
+
+    def test_hdf5_max_blend_with_neg_inf_init(self, tmp_path):
+        """HDF5TileStore accumulates tiles under a custom ``blend``/``blend_init``."""
+        h5py = pytest.importorskip("h5py")  # noqa: F841
+        from infinite_tensor import HDF5TileStore
+
+        window = TensorWindow((4, 4), stride=(2, 2))
+
+        def decreasing_constant(ctx):
+            row_index, col_index = ctx
+            return torch.full((4, 4), float(100 - (10 * row_index + col_index)))
+
+        filepath = tmp_path / "blend.h5"
+        with HDF5TileStore(str(filepath), mode="w", tile_size=8) as store:
+            tensor = InfiniteTensor(
+                (None, None),
+                decreasing_constant,
+                window,
+                tile_store=store,
+                tensor_id="blend_tensor",
+                blend=torch.maximum,
+                blend_init=float("-inf"),
+            )
+            result = tensor[0:8, 0:8].clone()
+
+        def expected_at(row, col):
+            """Max over windows (wr, wc) covering pixel (row, col); includes wr/wc = -1."""
+            covering = [
+                (wr, wc)
+                for wr in range(-1, 4)
+                for wc in range(-1, 4)
+                if 2 * wr <= row < 2 * wr + 4 and 2 * wc <= col < 2 * wc + 4
+            ]
+            return max(100 - (10 * wr + wc) for wr, wc in covering)
+
+        expected = torch.tensor([[float(expected_at(r, c)) for c in range(8)] for r in range(8)])
         assert torch.equal(result, expected)

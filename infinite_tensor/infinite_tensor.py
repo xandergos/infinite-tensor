@@ -178,6 +178,22 @@ def _validate_function(f: Callable) -> None:
         raise ValidationError(f"Function must be callable, got {type(f)}")
 
 
+def _validate_blend(blend: Callable | None) -> None:
+    """Validate the optional window-blend callable."""
+    if blend is None:
+        return
+    if not callable(blend):
+        raise ValidationError(f"blend must be callable or None, got {type(blend)}")
+
+
+def _validate_blend_init(blend_init: Any) -> None:
+    """Validate the optional scalar used to fill freshly-allocated blending buffers."""
+    if blend_init is None:
+        return
+    if isinstance(blend_init, bool) or not isinstance(blend_init, (int, float)):
+        raise ValidationError(f"blend_init must be int, float, or None, got {type(blend_init)}")
+
+
 def _validate_window_args(args: tuple, args_windows) -> None:
     """Validate window argument consistency for positional args only."""
     if args_windows is not None and len(args_windows) != len(args):
@@ -231,6 +247,8 @@ class InfiniteTensor:
         tile_store: TileStore | None = None,
         tensor_id: Any | None = None,
         batch_size: int | None = None,
+        blend: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+        blend_init: float | int | None = None,
     ):
         """Initialize an ``InfiniteTensor``.
 
@@ -257,9 +275,23 @@ class InfiniteTensor:
                 Random UUID if ``None``.
             batch_size: If set, ``f`` receives a list of up to ``batch_size``
                 window indices per call and must return a list of tensors.
+            blend: Optional elementwise callable ``(existing, incoming) -> combined``
+                used to combine overlapping windows in place of the default
+                sum. ``None`` keeps the fast ``+=`` path. Runtime-only: like
+                ``f`` it is NOT serialized into :meth:`to_json`, so reopening
+                a persistent store with a different ``blend`` produces
+                undefined results.
+            blend_init: Optional scalar used to fill newly-allocated blending
+                buffers (the output buffer in :class:`MemoryTileStore` and
+                fresh tiles in :class:`PersistentTileStore` subclasses).
+                ``None`` means zero. Non-additive blends (e.g. ``max``) should
+                set this to the blend's identity (e.g. ``float('-inf')``).
+                Runtime-only, not in :meth:`to_json`.
         """
         _validate_shape(shape)
         _validate_function(f)
+        _validate_blend(blend)
+        _validate_blend_init(blend_init)
         _validate_window_args(args or (), args_windows)
 
         if tile_store is None:
@@ -291,6 +323,8 @@ class InfiniteTensor:
         self._args_windows = normalized_args_windows
         self._output_window = output_window
         self._batch_size = batch_size
+        self._blend = blend
+        self._blend_init = blend_init
 
         self._store.register_tensor(self)
 
@@ -329,6 +363,14 @@ class InfiniteTensor:
     @property
     def batch_size(self) -> int | None:
         return self._batch_size
+
+    @property
+    def blend(self) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None:
+        return self._blend
+
+    @property
+    def blend_init(self) -> float | int | None:
+        return self._blend_init
 
     def clear_cache(self) -> None:
         """Drop regeneratable cached state for this tensor in the backing store."""

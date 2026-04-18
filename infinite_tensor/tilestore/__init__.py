@@ -311,7 +311,13 @@ class MemoryTileStore(TileStore):
         output_window = tensor.output_window
 
         output_shape = tuple(max((s.stop - s.start - 1) // s.step + 1, 0) for s in pixel_slices)
-        output_tensor = torch.zeros(output_shape, dtype=tensor.dtype, device=tensor.device)
+        if tensor.blend_init is None:
+            output_tensor = torch.zeros(output_shape, dtype=tensor.dtype, device=tensor.device)
+        else:
+            output_tensor = torch.full(
+                output_shape, tensor.blend_init, dtype=tensor.dtype, device=tensor.device
+            )
+        blend = tensor.blend
 
         for window_index in output_window.intersecting_windows(
             pixel_slices, tensor_shape=tensor.shape
@@ -347,7 +353,13 @@ class MemoryTileStore(TileStore):
                 )
                 for s, r in zip(intersected, pixel_slices)
             )
-            output_tensor[output_indices] += window_output[window_local_indices]
+            if blend is None:
+                output_tensor[output_indices] += window_output[window_local_indices]
+            else:
+                output_tensor[output_indices] = blend(
+                    output_tensor[output_indices],
+                    window_output[window_local_indices],
+                )
 
         return output_tensor
 

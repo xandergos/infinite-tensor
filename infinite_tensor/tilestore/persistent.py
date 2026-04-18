@@ -554,12 +554,19 @@ class PersistentTileStore(TileStore):
         )
 
         pending_tiles_for_window: set[tuple[int, ...]] = set()
+        blend = tensor.blend
+        blend_init = tensor.blend_init
 
         for tile_index in itertools.product(*tile_ranges):
             cache_key = (tensor_id, tile_index)
             tile = self._load_tile(tensor_id, tile_index)
             if tile is None:
-                tile = torch.zeros(tile_shape, dtype=tensor.dtype, device=tensor.device)
+                if blend_init is None:
+                    tile = torch.zeros(tile_shape, dtype=tensor.dtype, device=tensor.device)
+                else:
+                    tile = torch.full(
+                        tile_shape, blend_init, dtype=tensor.dtype, device=tensor.device
+                    )
                 self._cache_tile(tensor_id, tile_index, tile)
                 self._tile_contributions[cache_key] = set()
 
@@ -581,7 +588,10 @@ class PersistentTileStore(TileStore):
                 for s, b in zip(intersected, pixel_bounds)
             )
 
-            tile[tile_local] += output[value_local]
+            if blend is None:
+                tile[tile_local] += output[value_local]
+            else:
+                tile[tile_local] = blend(tile[tile_local], output[value_local])
             contributions.add(window_index)
             self._dirty_tiles.add(cache_key)
             pending_tiles_for_window.add(tile_index)
