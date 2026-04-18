@@ -36,3 +36,22 @@ include-package-data = true
 [tool.setuptools.packages.find]
 include = ["infinite_tensor*"]
 exclude = ["tests*", "docs*", "examples*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["infinite_tensor"]
+branch = true
