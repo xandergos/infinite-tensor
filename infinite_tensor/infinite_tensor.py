@@ -19,7 +19,7 @@ from infinite_tensor.utils import standardize_indices
 # CONSTANTS
 DEFAULT_TILE_SIZE = 512
 DEFAULT_DTYPE = torch.float32
-DEFAULT_CACHE_METHOD = 'indirect'
+DEFAULT_CACHE_METHOD = 'direct'
 DEFAULT_CACHE_LIMIT_BYTES = 10 * 1024 * 1024  # 10MB
 
 # ERROR MESSAGES
@@ -173,8 +173,7 @@ class InfiniteTensor:
                  tensor_id: Optional[Any] = None,
                  batch_size: Optional[int] = None,
                  cache_method: Literal['indirect', 'direct'] = DEFAULT_CACHE_METHOD,
-                 cache_limit: Optional[int] = DEFAULT_CACHE_LIMIT_BYTES,
-                 _created_via_store: bool = False):
+                 cache_limit: Optional[int] = DEFAULT_CACHE_LIMIT_BYTES):
         """Initialize an InfiniteTensor.
 
         An InfiniteTensor represents a theoretically infinite tensor that is processed in tiles.
@@ -184,7 +183,7 @@ class InfiniteTensor:
         Args:
             tensor_id: Any unique identifier for the tensor. This is used to identify the tensor in the TileStore.
                        If None, a random UUID string will be generated.
-            tile_store: TileStore to use for storing tiles.
+            tile_store: TileStore to use for storing tiles. If None, a new MemoryTileStore is created.
             shape: Shape of the tensor. Use None to indicate that the tensor is infinite in that dimension. For example (3, 10, None, None) 
                    indicates a 4-dimensional tensor with the first two dimensions of size 3 and 10, and the last two dimensions being infinite.
                    This might be used to represent a batch of 3 images, with 10 channels and an infinite width and height.
@@ -200,11 +199,6 @@ class InfiniteTensor:
             cache_method: Caching strategy - 'indirect' (default) stores tiles, 'direct' caches window outputs.
             cache_limit: Maximum cache size in bytes for direct caching (default: 10MB). None for unlimited.
         """
-        # Enforce creation via store.get_or_create
-        if not _created_via_store:
-            raise ValidationError("InfiniteTensor must be created via TileStore.get_or_create(..)")
-
-        # Validate parameters (will be skipped if reconstructing existing tensor)
         _validate_shape(shape)
         _validate_function(f)
         _validate_cache_method(cache_method, cache_limit)
@@ -214,9 +208,9 @@ class InfiniteTensor:
             _validate_tile_size(tile_size, infinite_dims)
         _validate_window_args(args or (), args_windows)
         
-        # Setup store and ID
         if tile_store is None:
-            raise ValidationError("A TileStore instance is required")
+            from infinite_tensor.tilestore import MemoryTileStore
+            tile_store = MemoryTileStore()
         self._store = tile_store
         # Ensure tensor id is a string
         self._uuid = str(tensor_id) if tensor_id is not None else str(uuid.uuid4())
@@ -247,22 +241,16 @@ class InfiniteTensor:
         _elem_size = torch.empty((), dtype=dtype).element_size()
         tile_bytes = int(np.prod(list(tile_shape))) * _elem_size
 
-        # Enforce that all args are InfiniteTensor in the same store, and store only their UUIDs
-        arg_ids = []
         for i, arg in enumerate(normalized_args):
             if not isinstance(arg, InfiniteTensor):
                 raise ValidationError("All positional args must be InfiniteTensor instances")
-            if arg._store is not self._store:
-                raise ValidationError("All related tensors must use the same TileStore instance")
             assert normalized_args_windows[i] is not None, f"Argument window must be provided for infinite tensors (arg {i})"
-            arg_ids.append(arg.uuid)
 
-        # Inline metadata on this instance
         self._shape = shape
         self._tile_size = tile_size_tuple
         self._dtype = dtype
         self._f = f
-        self._args = arg_ids
+        self._args = normalized_args
         self._args_windows = normalized_args_windows
         self._output_window = output_window
         self._tile_shape = tile_shape
@@ -271,8 +259,7 @@ class InfiniteTensor:
         self._cache_method = cache_method
         self._cache_limit = cache_limit
         
-        # Register this tensor instance in the store
-        self._store.register_tensor_meta(self._uuid, self.to_json())
+        self._store.register_tensor(self)
     
     @property
     def shape(self) -> tuple[int|None, ...]:
@@ -762,12 +749,12 @@ class InfiniteTensor:
         valid_window_indices = list(valid_window_indices)
         
         # Track which upstream windows were used (for cache prioritization)
-        used_windows_by_tensor: dict[str, list[tuple[int, ...]]] = {}
+        used_windows_by_tensor: dict["InfiniteTensor", list[tuple[int, ...]]] = {}
         
         def track_upstream_windows():
             """Calculate which upstream windows will be accessed."""
             for i, arg_window in enumerate(self.args_windows):
-                upstream = self._store.get_tensor(self.args[i])
+                upstream = self.args[i]
                 if upstream._cache_method != 'direct':
                     continue
                 for window_index in valid_window_indices:
@@ -777,25 +764,22 @@ class InfiniteTensor:
                     for upstream_window in itertools.product(
                         *[range(l, h + 1) for l, h in zip(lowest, highest)]
                     ):
-                        used_windows_by_tensor.setdefault(upstream._uuid, []).append(upstream_window)
+                        used_windows_by_tensor.setdefault(upstream, []).append(upstream_window)
         
         if self._cache_method == 'direct':
             track_upstream_windows()
             
         # Pre-process arguments
         for i, arg_window in enumerate(self.args_windows):
-            upstream = self._store.get_tensor(self.args[i])
-            arg_window = self.args_windows[i]
+            upstream = self.args[i]
             pixel_ranges = [arg_window.get_bounds(window_index) for window_index in valid_window_indices]
             upstream._apply_f_range(pixel_ranges, pending_evictions)
         
         if self.batch_size is None:
             for window_index in valid_window_indices:
-                # Resolve arg IDs to tensors lazily
                 args = []
                 for i, arg_window in enumerate(self.args_windows):
-                    upstream = self._store.get_tensor(self.args[i])
-                    arg_window = self.args_windows[i]
+                    upstream = self.args[i]
                     args.append(upstream._getitem_noevict(arg_window.get_bounds(window_index), pending_evictions))
                 with torch.no_grad():
                     output = self.f(window_index, *args)
@@ -818,8 +802,7 @@ class InfiniteTensor:
                 # Resolve args
                 for window_index in batch_window_indices:
                     for i, arg_window in enumerate(self.args_windows):
-                        upstream = self._store.get_tensor(self.args[i])
-                        arg_window = self.args_windows[i]
+                        upstream = self.args[i]
                         args[i].append(upstream._getitem_noevict(arg_window.get_bounds(window_index), pending_evictions))
                 
                 with torch.no_grad():
@@ -851,8 +834,8 @@ class InfiniteTensor:
         # Reorder caches: first promote USED windows, then GENERATED windows
         # This ensures generated windows have highest priority (evicted last)
         if self._cache_method == 'direct':
-            for tensor_id, windows in used_windows_by_tensor.items():
-                self._store.promote_windows_for(tensor_id, windows)
+            for upstream, windows in used_windows_by_tensor.items():
+                upstream._store.promote_windows_for(upstream._uuid, windows)
             self._store.promote_windows_for(self._uuid, valid_window_indices)
             
 
@@ -899,7 +882,7 @@ class InfiniteTensor:
             'shape': list(self.shape),
             'tile_size': list(self.tile_size),
             'dtype': _dtype_to_str(self.dtype),
-            'args': [str(a) for a in self.args],
+            'args': [a.uuid for a in self.args],
             'args_windows': [window_to_dict(w) for w in self.args_windows],
             'output_window': self.output_window.to_dict(),
             'tile_shape': list(self.tile_shape),

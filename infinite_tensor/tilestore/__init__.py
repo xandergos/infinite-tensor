@@ -25,6 +25,10 @@ class TileStore(abc.ABC):
     The tile store tracks per-tensor window processing state to prevent
     duplicate computation and enable efficient memory management.
     """
+    def register_tensor(self, tensor) -> None:
+        """Register a tensor instance (and its metadata) in the store."""
+        raise NotImplementedError
+
     def register_tensor_meta(self, tensor_id: str, meta: dict) -> None:
         """Register a new tensor and its metadata in the store."""
         raise NotImplementedError
@@ -116,6 +120,10 @@ class MemoryTileStore(TileStore):
         # Window cache for direct caching (per-tensor LRU cache)
         self._window_cache: Dict[str, OrderedDict] = {}
         self._window_cache_size: Dict[str, int] = {}
+
+    def register_tensor(self, tensor) -> None:
+        self._tensor_store[tensor.uuid] = tensor
+        self.register_tensor_meta(tensor.uuid, tensor.to_json())
 
     def register_tensor_meta(self, tensor_id: str, meta: dict) -> None:
         self._tensor_meta[tensor_id] = meta
@@ -257,12 +265,10 @@ class MemoryTileStore(TileStore):
             dtype=(dtype or DEFAULT_DTYPE),
             tile_store=self,
             tensor_id=tid_str,
-            _created_via_store=True,
             batch_size=batch_size,
             cache_method=cache_method,
             cache_limit=cache_limit,
         )
-        self._tensor_store[tid_str] = tensor
         return tensor
 
     def get_tensor(self, tensor_id: Any, f = None):

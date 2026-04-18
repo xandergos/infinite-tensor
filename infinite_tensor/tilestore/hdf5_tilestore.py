@@ -247,6 +247,12 @@ class HDF5TileStore(TileStore):
             return group
         return None
     
+    def register_tensor(self, tensor) -> None:
+        """Register a tensor instance, its function, and its metadata in the store."""
+        self._tensor_cache[tensor.uuid] = tensor
+        self._function_cache[tensor.uuid] = tensor.f
+        self.register_tensor_meta(tensor.uuid, tensor.to_json())
+
     def register_tensor_meta(self, tensor_id: str, meta: dict) -> None:
         """Register a new tensor and its metadata in the store.
         
@@ -394,7 +400,6 @@ class HDF5TileStore(TileStore):
             dtype=dtype,
             tile_store=self,
             tensor_id=tensor_id,
-            _created_via_store=True,
             batch_size=batch_size,
             cache_method=stored_cache_method,
             cache_limit=stored_cache_limit,
@@ -724,9 +729,6 @@ class HDF5TileStore(TileStore):
             # Reconstruct from metadata with provided function
             tensor = self._reconstruct_tensor_from_metadata(tid_str, f, batch_size=batch_size,
                                                             cache_method=cache_method, cache_limit=cache_limit)
-            # Cache tensor and function
-            self._tensor_cache[tid_str] = tensor
-            self._function_cache[tid_str] = f
             return tensor
         
         # Create new tensor
@@ -740,15 +742,10 @@ class HDF5TileStore(TileStore):
             dtype=(dtype or DEFAULT_DTYPE),
             tile_store=self,
             tensor_id=tid_str,
-            _created_via_store=True,
             batch_size=batch_size,
             cache_method=cache_method,
             cache_limit=cache_limit,
         )
-        
-        # Cache tensor and function
-        self._tensor_cache[tid_str] = tensor
-        self._function_cache[tid_str] = f
         
         return tensor
     
@@ -788,10 +785,4 @@ class HDF5TileStore(TileStore):
             )
         
         tensor = self._reconstruct_tensor_from_metadata(tid_str, func)
-        
-        # Cache tensor and function
-        self._tensor_cache[tid_str] = tensor
-        if f is not None:
-            self._function_cache[tid_str] = f
-        
         return tensor
