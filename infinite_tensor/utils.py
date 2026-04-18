@@ -5,6 +5,9 @@ tensor indices and slices. These functions handle the complex logic of
 converting various indexing formats into consistent internal representations.
 """
 
+from __future__ import annotations
+
+
 def normalize_slice(idx: int|slice, shape_dim: int|None):
     """Convert an index or slice to a normalized slice format.
     

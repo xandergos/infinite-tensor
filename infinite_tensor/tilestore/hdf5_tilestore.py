@@ -19,6 +19,8 @@ backend therefore supports any ``torch.device`` on the owning
 :class:`InfiniteTensor`.
 """
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 from typing import Optional

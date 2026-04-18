@@ -1,5 +1,7 @@
 """Sliding-window specification for infinite tensors."""
 
+from __future__ import annotations
+
 import itertools
 from typing import Iterator
 

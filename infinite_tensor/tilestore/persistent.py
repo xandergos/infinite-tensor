@@ -20,6 +20,8 @@ re-registration rules; the default compares persisted ``metadata`` and
 ``tile_size`` to the incoming tensor.
 """
 
+from __future__ import annotations
+
 import abc
 import itertools
 import warnings
