@@ -57,6 +57,14 @@ class PersistentTileStore(TileStore):
         self._processed_windows_cache: Dict[str, set] = {}
         self._tile_size_cache: Dict[str, tuple[int, ...]] = {}
         self._tensor_access_depth: Dict[str, int] = {}
+        self._dirty_tiles: set[tuple[str, tuple[int, ...]]] = set()
+        self._tile_contributions: Dict[
+            tuple[str, tuple[int, ...]], set[tuple[int, ...]]
+        ] = {}
+        self._pending_durable_windows: Dict[str, set[tuple[int, ...]]] = {}
+        self._window_pending_tiles: Dict[
+            tuple[str, tuple[int, ...]], set[tuple[int, ...]]
+        ] = {}
 
     # ---- Abstract storage primitives ----
 
@@ -98,15 +106,24 @@ class PersistentTileStore(TileStore):
     @abc.abstractmethod
     def _read_tile(
         self, tensor_id: str, tile_index: tuple[int, ...]
-    ) -> Optional[torch.Tensor]:
-        """Return the stored tile tensor, or ``None`` if absent on the backend."""
+    ) -> Optional[tuple[torch.Tensor, set[tuple[int, ...]]]]:
+        """Return ``(tile_tensor, contributions)`` or ``None`` if absent.
+
+        ``contributions`` is the set of window indices whose outputs are
+        already accumulated into the persisted tile. Backends that have no
+        record for ``tensor_id`` / ``tile_index`` return ``None``.
+        """
         ...
 
     @abc.abstractmethod
     def _write_tile(
-        self, tensor_id: str, tile_index: tuple[int, ...], tile: torch.Tensor
+        self,
+        tensor_id: str,
+        tile_index: tuple[int, ...],
+        tile: torch.Tensor,
+        contributions: set[tuple[int, ...]],
     ) -> None:
-        """Persist (or overwrite) ``tile`` for ``tensor_id`` at ``tile_index``."""
+        """Persist ``tile`` and its ``contributions`` set for ``tensor_id`` at ``tile_index``."""
         ...
 
     # ---- Overridable hooks ----
@@ -140,10 +157,29 @@ class PersistentTileStore(TileStore):
             )
 
     def flush(self) -> None:
-        """Flush pending backend writes. Default is a no-op."""
+        """Drain dirty tiles to the backend and flush backend buffers.
+
+        Every tile currently in ``_dirty_tiles`` is written via
+        :meth:`_write_dirty_tile`, which also cascades any newly-durable
+        windows into ``_append_processed_window``. Subclasses override
+        :meth:`_flush_backend` rather than this method to hook in
+        backend-level buffer flushes.
+        """
+        for key in list(self._dirty_tiles):
+            tensor_id, tile_index = key
+            self._write_dirty_tile(tensor_id, tile_index)
+        self._flush_backend()
 
     def close(self) -> None:
-        """Release backend resources. Default is a no-op."""
+        """Flush pending writes and release backend resources."""
+        self.flush()
+        self._close_backend()
+
+    def _flush_backend(self) -> None:
+        """Backend-level buffer flush hook. Default no-op."""
+
+    def _close_backend(self) -> None:
+        """Backend-level resource release hook. Default no-op."""
 
     # ---- Access tracking ----
 
@@ -298,7 +334,8 @@ class PersistentTileStore(TileStore):
         Tiles whose tensor has a positive ``begin_access``/``end_access`` depth
         are held in place; if every oldest entry belongs to a protected tensor
         the cache is allowed to exceed its limit until the protecting access
-        ends and calls this method again.
+        ends and calls this method again. Dirty victims are written to the
+        backend via :meth:`_write_dirty_tile` before being dropped.
         """
         if self.tile_cache_size is None:
             return
@@ -313,6 +350,10 @@ class PersistentTileStore(TileStore):
             if self._tensor_access_depth.get(tile_tensor_id, 0) == 0:
                 victims.append(key)
         for key in victims:
+            tensor_id, tile_index = key
+            if key in self._dirty_tiles:
+                self._write_dirty_tile(tensor_id, tile_index)
+            self._tile_contributions.pop(key, None)
             del self._tile_cache[key]
 
     def _get_cached_tile(
@@ -337,22 +378,56 @@ class PersistentTileStore(TileStore):
     def _load_tile(
         self, tensor_id: str, tile_index: tuple[int, ...]
     ) -> Optional[torch.Tensor]:
-        """Return the tile (cache first, then backend), or ``None`` if absent."""
+        """Return the tile (cache first, then backend), or ``None`` if absent.
+
+        On a cache miss that hits the backend, the tile's contribution set is
+        also populated into ``_tile_contributions`` so subsequent accumulations
+        can consult it.
+        """
         cached = self._get_cached_tile(tensor_id, tile_index)
         if cached is not None:
             return cached
-        tile = self._read_tile(tensor_id, tile_index)
-        if tile is not None:
-            tile = self._materialize_tile(tensor_id, tile)
-            self._cache_tile(tensor_id, tile_index, tile)
+        read_result = self._read_tile(tensor_id, tile_index)
+        if read_result is None:
+            return None
+        tile, contributions = read_result
+        tile = self._materialize_tile(tensor_id, tile)
+        self._cache_tile(tensor_id, tile_index, tile)
+        self._tile_contributions[(tensor_id, tile_index)] = set(contributions)
         return tile
 
-    def _store_tile(
-        self, tensor_id: str, tile_index: tuple[int, ...], tile: torch.Tensor
+    def _write_dirty_tile(
+        self, tensor_id: str, tile_index: tuple[int, ...]
     ) -> None:
-        """Refresh the cache and persist the tile via the backend."""
-        self._cache_tile(tensor_id, tile_index, tile)
-        self._write_tile(tensor_id, tile_index, tile)
+        """Write a dirty tile to the backend and cascade any now-durable windows.
+
+        After the tile is persisted, every window in its contribution set that
+        is currently pending durability has this tile removed from its
+        outstanding-tile set. When a window's outstanding set becomes empty,
+        it is durably appended to the backend processed-windows record.
+        """
+        key = (tensor_id, tile_index)
+        tile = self._tile_cache[key]
+        contributions = self._tile_contributions.get(key, set())
+        self._write_tile(tensor_id, tile_index, tile, contributions)
+        self._dirty_tiles.discard(key)
+
+        pending_windows = self._pending_durable_windows.get(tensor_id)
+        if not pending_windows:
+            return
+        for window_index in list(contributions):
+            if window_index not in pending_windows:
+                continue
+            window_key = (tensor_id, window_index)
+            outstanding = self._window_pending_tiles.get(window_key)
+            if outstanding is None:
+                continue
+            outstanding.discard(tile_index)
+            if outstanding:
+                continue
+            self._append_processed_window(tensor_id, window_index)
+            pending_windows.discard(window_index)
+            self._window_pending_tiles.pop(window_key, None)
 
     # ---- Processed-windows cache ----
 
@@ -383,18 +458,28 @@ class PersistentTileStore(TileStore):
         self._tensor_store[tensor_id] = tensor
         self._tile_size_cache[tensor_id] = effective_tile_size
         self._processed_windows_cache[tensor_id] = set()
-        self.flush()
+        self._flush_backend()
 
     def clear_tensor(self, tensor_id: str) -> None:
-        """Delete all backend and in-memory state for ``tensor_id``."""
+        """Delete all backend and in-memory state for ``tensor_id``.
+
+        Dirty tiles belonging to this tensor are discarded without being
+        written back — the data is being permanently removed.
+        """
         for key in [k for k in self._tile_cache if k[0] == tensor_id]:
             del self._tile_cache[key]
+        for key in [k for k in self._tile_contributions if k[0] == tensor_id]:
+            del self._tile_contributions[key]
+        self._dirty_tiles = {k for k in self._dirty_tiles if k[0] != tensor_id}
+        for key in [k for k in self._window_pending_tiles if k[0] == tensor_id]:
+            del self._window_pending_tiles[key]
+        self._pending_durable_windows.pop(tensor_id, None)
         self._tensor_store.pop(tensor_id, None)
         self._processed_windows_cache.pop(tensor_id, None)
         self._tile_size_cache.pop(tensor_id, None)
         self._tensor_access_depth.pop(tensor_id, None)
         self._delete_tensor_state(tensor_id)
-        self.flush()
+        self._flush_backend()
 
     def is_window_processed(
         self, tensor_id: str, window_index: tuple[int, ...]
@@ -407,7 +492,16 @@ class PersistentTileStore(TileStore):
         window_index: tuple[int, ...],
         output: torch.Tensor,
     ) -> None:
-        """Accumulate ``output`` into the covered tiles and mark the window processed."""
+        """Accumulate ``output`` into the covered tiles and mark the window processed.
+
+        Tiles are updated in the in-memory cache only; backend writes are
+        deferred until eviction or :meth:`flush`. The window is recorded as
+        durably processed (via :meth:`_append_processed_window`) only once
+        every intersecting tile has been written back. If a tile already has
+        ``window_index`` in its contribution set (e.g. from a previous
+        partial run reopened from disk), accumulation into that tile is
+        skipped to prevent double-counting.
+        """
         tensor = self._tensor_store[tensor_id]
         tensor_shape = tensor.shape
         tile_size_tuple = self._tile_size_cache[tensor_id]
@@ -423,12 +517,26 @@ class PersistentTileStore(TileStore):
         tile_ranges = [range(s.start, s.stop) for s in tile_range_slices]
         tile_shape = self._tile_shape(tensor_shape, tile_size_tuple)
 
+        processed = self._load_processed_windows(tensor_id)
+        assert window_index not in processed, (
+            f"Window {window_index} already processed for tensor {tensor_id}"
+        )
+
+        pending_tiles_for_window: set[tuple[int, ...]] = set()
+
         for tile_index in itertools.product(*tile_ranges):
+            cache_key = (tensor_id, tile_index)
             tile = self._load_tile(tensor_id, tile_index)
             if tile is None:
                 tile = torch.zeros(
                     tile_shape, dtype=tensor.dtype, device=tensor.device
                 )
+                self._cache_tile(tensor_id, tile_index, tile)
+                self._tile_contributions[cache_key] = set()
+
+            contributions = self._tile_contributions.setdefault(cache_key, set())
+            if window_index in contributions:
+                continue
 
             intersected = self._intersect_slices(
                 tensor_shape, tile_size_tuple, pixel_bounds, tile_index
@@ -445,15 +553,21 @@ class PersistentTileStore(TileStore):
             )
 
             tile[tile_local] += output[value_local]
-            self._store_tile(tensor_id, tile_index, tile)
+            contributions.add(window_index)
+            self._dirty_tiles.add(cache_key)
+            pending_tiles_for_window.add(tile_index)
 
-        processed = self._load_processed_windows(tensor_id)
-        assert window_index not in processed, (
-            f"Window {window_index} already processed for tensor {tensor_id}"
-        )
         processed.add(window_index)
-        self._append_processed_window(tensor_id, window_index)
-        self.flush()
+
+        if pending_tiles_for_window:
+            self._pending_durable_windows.setdefault(tensor_id, set()).add(
+                window_index
+            )
+            self._window_pending_tiles[(tensor_id, window_index)] = (
+                pending_tiles_for_window
+            )
+        else:
+            self._append_processed_window(tensor_id, window_index)
 
     def read_pixels(
         self,
@@ -525,12 +639,14 @@ class PersistentTileStore(TileStore):
                 f"clear the tensor and re-create it to change dtype"
             )
         if tensor.device != old_device:
-            for key in [k for k in self._tile_cache if k[0] == tensor_id]:
-                del self._tile_cache[key]
+            for key, cached_tile in list(self._tile_cache.items()):
+                if key[0] != tensor_id:
+                    continue
+                self._tile_cache[key] = cached_tile.to(tensor.device)
         self._write_tensor_metadata(
             tensor_id, tensor.to_json(), self._tile_size_cache[tensor_id]
         )
-        self.flush()
+        self._flush_backend()
 
     def __enter__(self):
         return self

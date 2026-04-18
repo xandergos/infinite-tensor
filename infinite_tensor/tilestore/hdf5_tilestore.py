@@ -119,12 +119,12 @@ class HDF5TileStore(PersistentTileStore):
             self._file.close()
             self._file = None
 
-    def close(self) -> None:
-        """Close all file handles. Call when done with the store."""
+    def _close_backend(self) -> None:
+        """Close the persistent HDF5 file handle."""
         self._close_file()
 
-    def flush(self) -> None:
-        """Flush pending writes to disk if the file is open."""
+    def _flush_backend(self) -> None:
+        """Flush HDF5 buffers to disk if the file is open."""
         if self._file is not None:
             self._file.flush()
 
@@ -220,7 +220,7 @@ class HDF5TileStore(PersistentTileStore):
 
     def _read_tile(
         self, tensor_id: str, tile_index: tuple[int, ...]
-    ) -> Optional[torch.Tensor]:
+    ) -> Optional[tuple[torch.Tensor, set[tuple[int, ...]]]]:
         tensor_group = self._get_tensor_group(tensor_id)
         if tensor_group is None:
             return None
@@ -228,10 +228,21 @@ class HDF5TileStore(PersistentTileStore):
         encoded = self._encode_index(tile_index)
         if encoded not in tiles_group:
             return None
-        return torch.from_numpy(tiles_group[encoded][:])
+        dataset = tiles_group[encoded]
+        tile_tensor = torch.from_numpy(dataset[:])
+        raw_contributions = dataset.attrs.get("contributions", [])
+        contributions = {
+            self._decode_index(entry.decode() if isinstance(entry, bytes) else entry)
+            for entry in raw_contributions
+        }
+        return tile_tensor, contributions
 
     def _write_tile(
-        self, tensor_id: str, tile_index: tuple[int, ...], tile: torch.Tensor
+        self,
+        tensor_id: str,
+        tile_index: tuple[int, ...],
+        tile: torch.Tensor,
+        contributions: set[tuple[int, ...]],
     ) -> None:
         tensor_group = self._get_tensor_group(tensor_id, create=True)
         tiles_group = tensor_group["tiles"]
@@ -239,10 +250,17 @@ class HDF5TileStore(PersistentTileStore):
         tile_numpy = tile.cpu().numpy()
         if encoded in tiles_group:
             del tiles_group[encoded]
-        tiles_group.create_dataset(
+        dataset = tiles_group.create_dataset(
             encoded,
             data=tile_numpy,
             compression=self.compression,
             compression_opts=self.compression_opts,
+        )
+        encoded_contributions = [
+            self._encode_index(window_index) for window_index in contributions
+        ]
+        vlen_str_dtype = h5py.special_dtype(vlen=str)
+        dataset.attrs.create(
+            "contributions", encoded_contributions, dtype=vlen_str_dtype
         )
 

@@ -301,12 +301,13 @@ class TestToHDF5:
         store.close()
 
     @requires_cuda
-    def test_device_change_rewrites_metadata_and_clears_tile_cache(self, tmp_path):
+    def test_device_change_rewrites_metadata_and_moves_tile_cache(self, tmp_path):
         filepath = tmp_path / "device.h5"
         store = HDF5TileStore(filepath)
         tensor = _make_tensor(device="cpu", tile_store=store, tensor_id="t1")
         _ = tensor[0:64, 0:64]
-        assert any(k[0] == "t1" for k in store._tile_cache)
+        cached_keys = [k for k in store._tile_cache if k[0] == "t1"]
+        assert cached_keys
 
         def f_cuda(ctx):
             return torch.ones((64, 64), device="cuda")
@@ -314,7 +315,10 @@ class TestToHDF5:
         tensor._f = f_cuda
         tensor.to("cuda")
         assert tensor.device.type == "cuda"
-        assert not any(k[0] == "t1" for k in store._tile_cache)
+        moved_keys = [k for k in store._tile_cache if k[0] == "t1"]
+        assert moved_keys == cached_keys
+        for key in moved_keys:
+            assert store._tile_cache[key].device.type == "cuda"
 
         with h5py.File(filepath, "r") as file_handle:
             stored = json.loads(
