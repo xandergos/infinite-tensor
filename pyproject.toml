@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "infinite-tensor"
-version = "0.2.3"
+version = "0.3.0"
 description = "A Python library for performing operations on tensors with infinite dimensions."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,3 +36,23 @@ include-package-data = true
 [tool.setuptools.packages.find]
 include = ["infinite_tensor*"]
 exclude = ["tests*", "docs*", "examples*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["infinite_tensor"]
+branch = true
