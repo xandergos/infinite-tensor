@@ -22,6 +22,7 @@ re-registration rules; the default compares persisted ``metadata`` and
 
 import abc
 import itertools
+import warnings
 from collections import OrderedDict
 from typing import Any, Dict, Optional
 
@@ -31,6 +32,12 @@ from infinite_tensor.tilestore import TileStore
 
 
 DEFAULT_TILE_SIZE = 512
+DEFAULT_CACHE_SIZE_BYTES = 100 * 1024 * 1024
+
+
+def _tensor_bytes(tensor: torch.Tensor) -> int:
+    """Return the size in bytes of ``tensor``'s storage (elements only)."""
+    return tensor.numel() * tensor.element_size()
 
 
 class PersistentTileStore(TileStore):
@@ -40,19 +47,38 @@ class PersistentTileStore(TileStore):
         tile_size: Per-infinite-dim tile extent. ``int`` applies uniformly; a
             tuple is validated per registered tensor against its infinite-dim
             count.
-        tile_cache_size: In-memory LRU size for decoded tiles. ``None`` for
-            unbounded.
+        cache_size_bytes: Byte limit for the in-memory tile LRU cache. ``None``
+            means unbounded on this axis. Defaults to 100 MiB.
+        cache_size_tiles: Tile-count limit for the in-memory tile LRU cache.
+            ``None`` means unbounded on this axis.
+
+    Deprecated kwargs (accepted via ``**kwargs`` for backward compatibility):
+        tile_cache_size: Old name for ``cache_size_tiles``.
     """
 
     def __init__(
         self,
         tile_size: int | tuple[int, ...] = DEFAULT_TILE_SIZE,
-        tile_cache_size: Optional[int] = 100,
+        cache_size_bytes: Optional[int] = DEFAULT_CACHE_SIZE_BYTES,
+        cache_size_tiles: Optional[int] = None,
+        **kwargs,
     ):
+        if "tile_cache_size" in kwargs:
+            warnings.warn(
+                "tile_cache_size is deprecated; use cache_size_tiles instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            cache_size_tiles = kwargs.pop("tile_cache_size")
+        if kwargs:
+            raise TypeError(f"Unexpected keyword arguments: {list(kwargs)}")
+
         super().__init__()
         self.tile_size = tile_size
-        self.tile_cache_size = tile_cache_size
+        self._cache_size_bytes = cache_size_bytes
+        self._cache_size_tiles = cache_size_tiles
         self._tile_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+        self._tile_bytes: int = 0
         self._tensor_store: Dict[str, Any] = {}
         self._processed_windows_cache: Dict[str, set] = {}
         self._tile_size_cache: Dict[str, tuple[int, ...]] = {}
@@ -188,7 +214,7 @@ class PersistentTileStore(TileStore):
 
         Access depth is tracked per tensor. While any tensor has depth > 0,
         its tiles are skipped by :meth:`_evict_tile_cache`, which allows the
-        cache to temporarily overrun ``tile_cache_size`` for tiles loaded
+        cache to temporarily overrun the configured limits for tiles loaded
         during the ongoing access.
         """
         self._tensor_access_depth[tensor_id] = (
@@ -322,38 +348,51 @@ class PersistentTileStore(TileStore):
         """Insert or refresh a tile in the LRU cache."""
         key = (tensor_id, tile_index)
         if key in self._tile_cache:
+            previous = self._tile_cache[key]
+            self._tile_bytes -= _tensor_bytes(previous)
             self._tile_cache[key] = tile
+            self._tile_bytes += _tensor_bytes(tile)
             self._tile_cache.move_to_end(key)
             return
         self._tile_cache[key] = tile
+        self._tile_bytes += _tensor_bytes(tile)
         self._evict_tile_cache()
 
+    def _cache_over_limit(self) -> bool:
+        """Return whether the tile cache currently exceeds either configured limit."""
+        if (
+            self._cache_size_bytes is not None
+            and self._tile_bytes > self._cache_size_bytes
+        ):
+            return True
+        if (
+            self._cache_size_tiles is not None
+            and len(self._tile_cache) > self._cache_size_tiles
+        ):
+            return True
+        return False
+
     def _evict_tile_cache(self) -> None:
-        """Trim the tile cache to ``tile_cache_size``, skipping protected tensors.
+        """Trim the tile cache to its byte/tile limits, skipping protected tensors.
 
         Tiles whose tensor has a positive ``begin_access``/``end_access`` depth
         are held in place; if every oldest entry belongs to a protected tensor
-        the cache is allowed to exceed its limit until the protecting access
+        the cache is allowed to exceed its limits until the protecting access
         ends and calls this method again. Dirty victims are written to the
         backend via :meth:`_write_dirty_tile` before being dropped.
         """
-        if self.tile_cache_size is None:
+        if not self._cache_over_limit():
             return
-        overflow = len(self._tile_cache) - self.tile_cache_size
-        if overflow <= 0:
-            return
-        victims: list[tuple] = []
-        for key in self._tile_cache:
-            if len(victims) >= overflow:
+        for key in list(self._tile_cache):
+            if not self._cache_over_limit():
                 break
-            tile_tensor_id, _ = key
-            if self._tensor_access_depth.get(tile_tensor_id, 0) == 0:
-                victims.append(key)
-        for key in victims:
-            tensor_id, tile_index = key
+            tile_tensor_id, tile_index = key
+            if self._tensor_access_depth.get(tile_tensor_id, 0) != 0:
+                continue
             if key in self._dirty_tiles:
-                self._write_dirty_tile(tensor_id, tile_index)
+                self._write_dirty_tile(tile_tensor_id, tile_index)
             self._tile_contributions.pop(key, None)
+            self._tile_bytes -= _tensor_bytes(self._tile_cache[key])
             del self._tile_cache[key]
 
     def _get_cached_tile(
@@ -460,6 +499,26 @@ class PersistentTileStore(TileStore):
         self._processed_windows_cache[tensor_id] = set()
         self._flush_backend()
 
+    def clear_cache(self, tensor_id: str) -> None:
+        """Flush dirty tiles for ``tensor_id`` and drop the in-memory tile cache.
+
+        Persistent state (on-disk tiles, processed-window records, metadata)
+        is untouched; this only evicts in-memory tile buffers and their
+        contribution sets, forcing subsequent reads to re-fetch from the
+        backend. Any dirty tiles are written back first via
+        :meth:`_write_dirty_tile` so no accumulated contributions are lost.
+        """
+        if tensor_id not in self._tensor_store:
+            return
+        for key in [k for k in self._dirty_tiles if k[0] == tensor_id]:
+            self._write_dirty_tile(key[0], key[1])
+        self._flush_backend()
+        for key in [k for k in self._tile_cache if k[0] == tensor_id]:
+            self._tile_bytes -= _tensor_bytes(self._tile_cache[key])
+            del self._tile_cache[key]
+        for key in [k for k in self._tile_contributions if k[0] == tensor_id]:
+            del self._tile_contributions[key]
+
     def clear_tensor(self, tensor_id: str) -> None:
         """Delete all backend and in-memory state for ``tensor_id``.
 
@@ -467,6 +526,7 @@ class PersistentTileStore(TileStore):
         written back — the data is being permanently removed.
         """
         for key in [k for k in self._tile_cache if k[0] == tensor_id]:
+            self._tile_bytes -= _tensor_bytes(self._tile_cache[key])
             del self._tile_cache[key]
         for key in [k for k in self._tile_contributions if k[0] == tensor_id]:
             del self._tile_contributions[key]
@@ -642,7 +702,10 @@ class PersistentTileStore(TileStore):
             for key, cached_tile in list(self._tile_cache.items()):
                 if key[0] != tensor_id:
                     continue
-                self._tile_cache[key] = cached_tile.to(tensor.device)
+                self._tile_bytes -= _tensor_bytes(cached_tile)
+                migrated = cached_tile.to(tensor.device)
+                self._tile_cache[key] = migrated
+                self._tile_bytes += _tensor_bytes(migrated)
         self._write_tensor_metadata(
             tensor_id, tensor.to_json(), self._tile_size_cache[tensor_id]
         )

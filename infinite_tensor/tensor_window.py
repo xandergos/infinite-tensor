@@ -86,7 +86,9 @@ class TensorWindow:
         )
 
     def intersecting_windows(
-        self, pixel_slices: tuple[slice, ...]
+        self,
+        pixel_slices: tuple[slice, ...],
+        tensor_shape: tuple[int | None, ...] | None = None,
     ) -> Iterator[tuple[int, ...]]:
         """Yield every window index whose pixel extent intersects ``pixel_slices``.
 
@@ -94,6 +96,12 @@ class TensorWindow:
             pixel_slices: One slice per dimension in window-space order. Each
                 slice must have explicit ``start``/``stop``; ``step`` is
                 ignored (windows intersect on pixel extent, not stride).
+            tensor_shape: Optional per-output-dim shape used to filter windows
+                that would extend past a bounded dimension. ``None`` entries
+                mark infinite dims (no filtering on that axis); positive ints
+                mark finite dims (a window is dropped if its :meth:`get_bounds`
+                start is negative or stop exceeds the declared extent). When
+                omitted, no bounds filtering is applied.
 
         Yields:
             Window-index tuples ``(w_0, ..., w_n)``. Empty if any dimension's
@@ -116,7 +124,22 @@ class TensorWindow:
             if low > high:
                 return
             per_dim_ranges.append(range(low, high + 1))
-        yield from itertools.product(*per_dim_ranges)
+
+        if tensor_shape is None:
+            yield from itertools.product(*per_dim_ranges)
+            return
+
+        for window_index in itertools.product(*per_dim_ranges):
+            bounds = self.get_bounds(window_index)
+            in_bounds = True
+            for output_dim_extent, bound in zip(tensor_shape, bounds):
+                if output_dim_extent is None:
+                    continue
+                if bound.start < 0 or bound.stop > output_dim_extent:
+                    in_bounds = False
+                    break
+            if in_bounds:
+                yield window_index
 
     def get_bounds(self, window_index: tuple[int, ...]) -> tuple[slice, ...]:
         """Return the pixel-space slices covered by a single window.

@@ -7,7 +7,7 @@ from .infinite_tensor import (
     ValidationError,
 )
 from .tensor_window import TensorWindow
-from .tilestore import MemoryTileStore, PersistentTileStore
+from .tilestore import MemoryTileStore
 from importlib.metadata import PackageNotFoundError, version
 
 # Optional HDF5 support
@@ -31,7 +31,6 @@ __all__ = [
     'ValidationError',
     'TensorWindow',
     'MemoryTileStore',
-    'PersistentTileStore',
 ]
 
 if _HAS_HDF5:

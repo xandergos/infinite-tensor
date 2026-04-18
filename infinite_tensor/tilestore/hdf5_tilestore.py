@@ -26,7 +26,11 @@ from typing import Optional
 
 import torch
 
-from infinite_tensor.tilestore.persistent import DEFAULT_TILE_SIZE, PersistentTileStore
+from infinite_tensor.tilestore.persistent import (
+    DEFAULT_CACHE_SIZE_BYTES,
+    DEFAULT_TILE_SIZE,
+    PersistentTileStore,
+)
 
 try:
     import h5py
@@ -53,8 +57,13 @@ class HDF5TileStore(PersistentTileStore):
         tile_size: Per-infinite-dim tile extent. ``int`` applies uniformly; a
             tuple is validated per registered tensor against its infinite-dim
             count. Defaults to 512.
-        tile_cache_size: In-memory LRU size for decoded tiles. ``None`` for
-            unbounded. Default 100.
+        cache_size_bytes: Byte limit for the in-memory tile LRU cache. ``None``
+            means unbounded on this axis. Defaults to 100 MiB.
+        cache_size_tiles: Tile-count limit for the in-memory tile LRU cache.
+            ``None`` means unbounded on this axis.
+
+    Deprecated kwargs (accepted via ``**kwargs`` for backward compatibility):
+        tile_cache_size: Old name for ``cache_size_tiles``.
 
     Raises:
         ImportError: If h5py is not installed.
@@ -67,14 +76,21 @@ class HDF5TileStore(PersistentTileStore):
         compression: str | None = "gzip",
         compression_opts: int | None = 4,
         tile_size: int | tuple[int, ...] = DEFAULT_TILE_SIZE,
-        tile_cache_size: Optional[int] = 100,
+        cache_size_bytes: Optional[int] = DEFAULT_CACHE_SIZE_BYTES,
+        cache_size_tiles: Optional[int] = None,
+        **kwargs,
     ):
         if not HAS_H5PY:
             raise ImportError(
                 "h5py is required for HDF5TileStore. "
                 "Install it with: pip install infinite-tensor[hdf5]"
             )
-        super().__init__(tile_size=tile_size, tile_cache_size=tile_cache_size)
+        super().__init__(
+            tile_size=tile_size,
+            cache_size_bytes=cache_size_bytes,
+            cache_size_tiles=cache_size_tiles,
+            **kwargs,
+        )
         self.filepath = Path(filepath)
         self.compression = compression
         self.compression_opts = compression_opts

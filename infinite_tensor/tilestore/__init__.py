@@ -13,6 +13,7 @@ The only interface between an InfiniteTensor and its store is:
 """
 
 import abc
+import warnings
 from collections import OrderedDict
 from typing import Any, Dict, Optional
 
@@ -110,6 +111,75 @@ class TileStore(abc.ABC):
         caller can roll back the tensor's declared device/dtype.
         """
         ...
+
+    def get_or_create(
+        self,
+        tensor_id,
+        shape,
+        f,
+        output_window,
+        *,
+        args=None,
+        args_windows=None,
+        dtype=None,
+        batch_size=None,
+        **kwargs,
+    ):
+        """Deprecated shim that constructs an :class:`InfiniteTensor`.
+
+        The store already handles idempotent registration (same ``tensor_id``
+        + matching metadata is validated by :meth:`register_tensor`), so this
+        just forwards to ``InfiniteTensor(...)``. Legacy kwargs are mapped
+        onto their modern store-level equivalents:
+
+          - ``cache_limit`` → ``self._cache_size_bytes`` (both stores expose
+            this since :class:`PersistentTileStore` was byte-limited).
+          - ``tile_size`` → ``self.tile_size`` (persistent stores only;
+            :class:`MemoryTileStore` has no tile concept).
+          - ``cache_method`` has no modern equivalent; the rewrite dropped
+            the direct/indirect split in favor of a single shared LRU.
+        """
+        warnings.warn(
+            "TileStore.get_or_create is deprecated; construct InfiniteTensor "
+            "directly with tile_store=store, tensor_id=...",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        kwargs.pop("cache_method", None)
+        cache_limit = kwargs.pop("cache_limit", None)
+        legacy_tile_size = kwargs.pop("tile_size", None)
+        if kwargs:
+            raise TypeError(f"Unexpected keyword arguments: {list(kwargs)}")
+
+        if cache_limit is not None:
+            self._cache_size_bytes = cache_limit
+        if legacy_tile_size is not None and hasattr(self, "tile_size"):
+            self.tile_size = legacy_tile_size
+
+        from infinite_tensor.infinite_tensor import DEFAULT_DTYPE, InfiniteTensor
+
+        return InfiniteTensor(
+            shape,
+            f,
+            output_window,
+            args=args,
+            args_windows=args_windows,
+            dtype=dtype if dtype is not None else DEFAULT_DTYPE,
+            tile_store=self,
+            tensor_id=tensor_id,
+            batch_size=batch_size,
+        )
+
+    def clear_direct_caches(self) -> None:
+        """Deprecated shim that calls :meth:`clear_cache` for every registered tensor."""
+        warnings.warn(
+            "TileStore.clear_direct_caches is deprecated; call "
+            "InfiniteTensor.clear_cache() or store.clear_cache(tensor_id) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        for tensor_id in list(getattr(self, "_tensor_store", {})):
+            self.clear_cache(tensor_id)
 
 
 def _tensor_bytes(tensor: torch.Tensor) -> int:
@@ -247,7 +317,9 @@ class MemoryTileStore(TileStore):
             output_shape, dtype=tensor.dtype, device=tensor.device
         )
 
-        for window_index in output_window.intersecting_windows(pixel_slices):
+        for window_index in output_window.intersecting_windows(
+            pixel_slices, tensor_shape=tensor.shape
+        ):
             window_output = self._fetch_window(tensor_id, window_index)
             window_bounds = output_window.get_bounds(window_index)
 
@@ -298,6 +370,4 @@ class MemoryTileStore(TileStore):
             self._bytes += _tensor_bytes(migrated)
 
 
-from infinite_tensor.tilestore.persistent import PersistentTileStore
-
-__all__ = ["TileStore", "MemoryTileStore", "PersistentTileStore"]
+__all__ = ["TileStore", "MemoryTileStore"]

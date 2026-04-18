@@ -156,6 +156,57 @@ class TestInfiniteTensorEdgeCases:
         expected = torch.ones(10, 200, 200)
         assert torch.allclose(result, expected)
 
+    def test_bounded_dim_filters_out_of_range_windows(self):
+        """Windows whose bounds escape a bounded dim must not be generated."""
+        from infinite_tensor.tilestore import MemoryTileStore
+
+        call_count = {"n": 0}
+
+        def counting_func(ctx):
+            call_count["n"] += 1
+            return torch.ones((7, 64))
+
+        tile_size = 64
+        window = TensorWindow(size=(7, tile_size), stride=(7, tile_size))
+        tensor = InfiniteTensor(
+            (10, None),
+            counting_func,
+            window,
+            tile_store=MemoryTileStore(),
+            tensor_id=uuid.uuid4(),
+        )
+
+        result = tensor[0:10, 0:tile_size]
+        assert tuple(result.shape) == (10, tile_size)
+        assert call_count["n"] == 1
+
+    def test_bounded_dim_filters_negative_offset_windows(self):
+        """Negative-offset windows that start before a bounded dim are skipped."""
+        from infinite_tensor.tilestore import MemoryTileStore
+
+        call_count = {"n": 0}
+
+        def counting_func(ctx):
+            call_count["n"] += 1
+            return torch.ones((8, 64))
+
+        tile_size = 64
+        window = TensorWindow(
+            size=(8, tile_size),
+            stride=(8, tile_size),
+            offset=(-4, 0),
+        )
+        tensor = InfiniteTensor(
+            (8, None),
+            counting_func,
+            window,
+            tile_store=MemoryTileStore(),
+            tensor_id=uuid.uuid4(),
+        )
+
+        _ = tensor[0:8, 0:tile_size]
+        assert call_count["n"] == 0
+
 
 class TestInfiniteTensorIntegration:
     """Integration tests combining multiple features."""
