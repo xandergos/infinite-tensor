@@ -31,11 +31,11 @@ Overlapping output windows are **summed** in the region they overlap by default.
 
 1. `**TensorWindow`**: output window specification. Fixed `size`, optional `stride` (defaults to `size`, non-overlapping) and `offset` (defaults to zeros). Your `f` must return a tensor of exactly `size`.
 2. `**InfiniteTensor`**: immutable tensor with a shape (any number of `None` dims), a deterministic `f`, a declared `dtype` and `device`, and a backing `TileStore`. Can depend on other `InfiniteTensor`s through `args` / `args_windows`.
-3. `**TileStore**`: owns the processed-window set and the storage. Pick one:
-  - `MemoryTileStore`: in-memory, single LRU cache shared by every tensor registered against it.
-  - `HDF5TileStore`: persistent, accumulates window outputs into fixed-size tiles in an HDF5 file on disk. Requires `h5py` (install via the `hdf5` extra).
+3. `**TileStore**`: owns cached results. Pick one:
+  - `MemoryTileStore`: in-memory, one shared cache for every tensor using that store.
+  - `HDF5TileStore`: persistent, keeps computed results on disk in an HDF5 file so later reads can reuse them. Requires `h5py` (install via the `hdf5` extra).
 
-Subclass `PersistentTileStore` (`from infinite_tensor.tilestore.persistent import PersistentTileStore`) to add other durable backends; see [Extending with a custom persistent backend](#extending-with-a-custom-persistent-backend).
+If you are building your own durable backend, subclass `PersistentTileStore` (`from infinite_tensor.tilestore.persistent import PersistentTileStore`); see [Extending with a custom persistent backend](#extending-with-a-custom-persistent-backend).
 
 ## Getting Started
 
@@ -62,7 +62,7 @@ tensor = InfiniteTensor(
 
 `tile_store` is optional; if omitted, a fresh `MemoryTileStore` with an unbounded cache is created for you.
 
-`tensor_id` defaults to a random UUID4. Pass an explicit id if you want to **reconnect** to stored data on a later run (for persistent stores) or across tensor re-creations in the same session. On re-construction with the same id, the store validates that the new tensor's metadata matches the old one.
+`tensor_id` defaults to a random id. Pass an explicit id if you want to **reconnect** to stored data on a later run (for persistent stores) or across tensor re-creations in the same session. When you rebuild a tensor with the same id, its configuration must match the previous one.
 
 ### 2. Slicing
 
@@ -82,7 +82,7 @@ Pass `device=` and/or `dtype=` at construction. `f` must return tensors matching
 
 ### 4. Cache size and eviction
 
-`MemoryTileStore` holds one LRU cache shared by every tensor registered against it:
+`MemoryTileStore` holds one shared cache for every tensor using that store:
 
 ```python
 tile_store = MemoryTileStore(
@@ -93,25 +93,25 @@ tile_store = MemoryTileStore(
 
 Either (or both) of `cache_size_bytes` / `cache_size_windows` may be `None` (default, unbounded on that axis) or a positive int.
 
-Eviction is deferred while any tensor is inside a `__getitem__` call. Upstream caches are also pinned for the duration of a downstream read, so a single operation that temporarily overruns the cache still succeeds. Once the outermost access returns, the cache trims back to its limits.
+Eviction is paused while a read is in progress, including reads triggered through dependencies. That means a single access can temporarily exceed the cache limit and still finish successfully. Once the read completes, the cache trims back to its limits.
 
-`HDF5TileStore` has its own separate tile LRU; see [Persistent storage with HDF5](#10-persistent-storage-with-hdf5).
+`HDF5TileStore` has its own separate on-disk cache settings; see [Persistent storage with HDF5](#10-persistent-storage-with-hdf5).
 
 ### 5. Clearing state
 
 ```python
 tensor.clear_cache()
-tile_store.clear_tensor(tensor.uuid)
+tile_store.clear_tensor("my_infinite_tensor")
 ```
 
-- `tensor.clear_cache()` drops regeneratable cached state for this tensor. On `MemoryTileStore` it wipes the tensor's windows so they recompute on next access. On `HDF5TileStore` (and any `PersistentTileStore`) it flushes dirty tiles to disk and then drops the tensor's in-memory tile cache; persisted tiles and the processed-window record are untouched.
-- `tile_store.clear_tensor(tensor_id)` wipes **everything** for the tensor: registration, metadata, cached windows, and (on persistent stores) the on-disk tile data and processed-window record. This is the only way to un-process a window on a persistent store.
+- `tensor.clear_cache()` drops recomputable in-memory state for this tensor. On `MemoryTileStore` that means cached windows are forgotten and will be recomputed on next access. On persistent stores it also flushes pending writes before dropping the in-memory cache, but it does **not** delete data already saved on disk.
+- `tile_store.clear_tensor(tensor_id)` deletes **all** state for the tensor, including any persisted data on disk. Use this when you want to fully reset a tensor instead of just clearing RAM caches.
 
 ## Advanced Features
 
 ### 6. Dependency chaining
 
-Build pipelines by making one infinite tensor depend on another. `f` is called as `f(ctx, *args_sliced)`, where `args_sliced[i]` is the upstream `args[i]` sliced by `args_windows[i].get_bounds(ctx)`.
+Build pipelines by making one infinite tensor depend on another. `f` is called as `f(ctx, *args_sliced)`, where each `args_sliced[i]` is the part of upstream tensor `args[i]` needed for the current output window, as described by `args_windows[i]`.
 
 Keep the **output window** separate from the **arg window**; the arg window typically carries the padding/offset:
 
@@ -160,7 +160,7 @@ blurred = InfiniteTensor(
 out = blurred[:, 0:1024, 0:1024]
 ```
 
-Do **not** manually index `base` inside `f`. Use `args` / `args_windows`; the framework manages slicing, batching, and cross-store cache pinning.
+Do **not** manually index `base` inside `f`. Use `args` / `args_windows`; the library handles the upstream slicing for you and keeps dependency reads efficient.
 
 ### 7. Batching
 
@@ -193,10 +193,15 @@ Batch size is a per-tensor knob. `base` (with `batch_size=None`) is still called
 
 ### 8. `dimension_map` on `TensorWindow`
 
-`TensorWindow.dimension_map` is an optional per-output-dim remap applied by `get_bounds`. `None` in an entry turns that output dim into a singleton (`slice(0, 1)`); an integer entry says which window-space dim feeds that output dim. It is useful when two output dims must step in lockstep, or when an output dim should never slide.
+`dimension_map` is an advanced option that lets you say which sliding window coordinate controls each output dimension.
+
+- Use an integer to reuse one of the window coordinates for that output dimension.
+- Use `None` to keep that output dimension fixed instead of sliding.
+
+This is mainly useful when two output dimensions should move together, or when one dimension should always stay at a single position.
 
 ```python
-# Singleton leading dim: output window always covers dim 0 as slice(0, 1).
+# Fixed leading dim: the first dimension always stays at length 1.
 window = TensorWindow(
     size=(1, 64, 64),
     stride=(1, 64, 64),
@@ -204,14 +209,14 @@ window = TensorWindow(
 )
 ```
 
-For most pipelines you can leave `dimension_map=None` (the default); size/stride/offset on the output dim itself already handle fixed-size dims.
+For most pipelines you can leave `dimension_map=None` (the default). You only need it when the default "one sliding coordinate per output dimension" behavior is not what you want.
 
 ### 9. Custom window blending
 
-Overlapping windows are summed by default. Two optional `InfiniteTensor` kwargs override that:
+Overlapping windows are summed by default. Two optional `InfiniteTensor` kwargs let you change that rule:
 
-- `blend: Callable[[Tensor, Tensor], Tensor] | None` — elementwise `(existing, incoming) -> combined`. `None` (default) keeps the fast `+=` path.
-- `blend_init: float | int | None` — scalar used to fill freshly-allocated blending buffers (the read-time output tensor in `MemoryTileStore`, fresh tiles in any `PersistentTileStore` subclass). `None` (default) means zero. Non-additive blends should set this to their identity so first-touch against zero does not corrupt the result.
+- `blend: Callable[[Tensor, Tensor], Tensor] | None` — elementwise `(existing, incoming) -> combined`. `None` (default) keeps the usual sum behavior.
+- `blend_init: float | int | None` — starting value used before any window contributes to a pixel. `None` (default) means zero. For non-additive blends, set this to the identity of your blend, such as `float("-inf")` for `torch.maximum`.
 
 ```python
 import torch
@@ -235,7 +240,7 @@ result = tensor[0:128, 0:128]  # per-pixel max over every covering window
 
 Both kwargs apply to `MemoryTileStore` and any `PersistentTileStore` subclass (including `HDF5TileStore`).
 
-Like `f` and `batch_size`, neither field is serialized into `to_json()`. Reopening a persistent file with a different `blend` / `blend_init` gives undefined results — stored tiles are already combined under the previous rule. Treat this as part of the same contract that says `f` must not change between sessions.
+If you persist data to disk, keep the same `blend` / `blend_init` when reopening it. Stored results have already been combined under that rule, so changing it later can produce incorrect answers.
 
 ### 10. Persistent storage with HDF5
 
@@ -251,26 +256,26 @@ with HDF5TileStore("tensor_data.h5", tile_size=512) as tile_store:
         tensor_id="my_infinite_tensor",
     )
     result = tensor[0:2048, 0:2048]
-# leaving the `with` block flushes dirty tiles and closes the file
+# leaving the `with` block saves pending cached data and closes the file
 ```
 
-`tile_size` controls how HDF5 accumulates overlapping window outputs into on-disk tiles. It may be an int (applied uniformly to every infinite dim) or a tuple sized to the tensor's infinite-dim count. Reopening the same file with the same `tensor_id` must use matching metadata and `tile_size`, or `register_tensor` raises `ValidationError`.
+`tile_size` controls how results are grouped on disk. It may be an int (applied uniformly to every infinite dim) or a tuple sized to the tensor's infinite-dim count. Reopening the same file with the same `tensor_id` must use the same tensor configuration and `tile_size`, or construction fails with `ValidationError`.
 
-`HDF5TileStore` uses a **write-back** tile cache. Dirty tiles live in memory until:
+`HDF5TileStore` keeps recent updates in memory until:
 
-- they are evicted from the LRU,
+- they are evicted from the cache,
 - you call `tile_store.flush()` (persist everything, keep the file open),
 - or you call `tile_store.close()` / exit the `with` block.
 
-Crashing before any of those loses the dirty tiles. Always wrap long-running persistent workloads in `with HDF5TileStore(...) as store:`, or call `flush()` at checkpoints.
+Crashing before any of those loses the in-memory updates that have not been written yet. Always wrap long-running persistent workloads in `with HDF5TileStore(...) as store:`, or call `flush()` at checkpoints.
 
-HDF5 tile caching is separate from the `MemoryTileStore` cache:
+The HDF5 store has its own cache limits:
 
 ```python
 HDF5TileStore(
     "tensor_data.h5",
     tile_size=512,
-    cache_size_bytes=256 * 1024 * 1024,  # 256 MiB tile LRU; default 100 MiB
+    cache_size_bytes=256 * 1024 * 1024,  # 256 MiB cache; default 100 MiB
     cache_size_tiles=None,               # no tile-count limit
 )
 ```
@@ -281,7 +286,7 @@ Reconnecting in a later process:
 with HDF5TileStore("tensor_data.h5", tile_size=512) as tile_store:
     tensor = InfiniteTensor(
         shape=(None, None),
-        f=your_processing_function,      # same f, or a determinism-equivalent one
+        f=your_processing_function,      # same f, or one that produces the same results
         output_window=TensorWindow((512, 512)),
         tile_store=tile_store,
         tensor_id="my_infinite_tensor",  # same id as before
@@ -289,28 +294,30 @@ with HDF5TileStore("tensor_data.h5", tile_size=512) as tile_store:
     result = tensor[0:2048, 0:2048]      # served from disk; f is only called for new windows
 ```
 
-Once a window is processed on a persistent store it cannot be un-processed. `clear_cache` only drops in-memory buffers; use `tile_store.clear_tensor(tensor.uuid)` to wipe a tensor's durable state.
+Once data is saved to a persistent store, `clear_cache` only drops in-memory buffers. Use `tile_store.clear_tensor("my_infinite_tensor")` to fully wipe the saved state for that tensor.
 
 ### Extending with a custom persistent backend
 
-`PersistentTileStore` implements the tile-accumulation scaffolding (tile math, LRU, window accumulation, write-back) generically. To plug in a different on-disk format, subclass it and implement the seven storage primitives:
+This section is only for backend authors.
+
+`PersistentTileStore` provides the shared machinery for disk-backed stores. To plug in a different on-disk format, subclass it and implement the seven required storage methods:
 
 ```python
 from infinite_tensor.tilestore.persistent import PersistentTileStore
 ```
 
-See `infinite_tensor/tilestore/persistent.py` for the full contract (and `hdf5_tilestore.py` for a worked example).
+See `infinite_tensor/tilestore/persistent.py` for the full contract and `hdf5_tilestore.py` for a worked example.
 
 ## Important Notes
 
-1. **Deterministic `f`**: stored outputs assume `f` is pure. Non-determinism silently breaks the "already processed, skip" optimization and can corrupt dependent tensors.
+1. **Deterministic `f`**: stored outputs assume `f` is pure. Non-determinism can make cached results disagree with fresh recomputation and can corrupt dependent tensors.
 2. **Exact output shape**: `f`'s return must match `TensorWindow.size` exactly (`ShapeMismatchError` otherwise).
 3. **Device and dtype**: every `InfiniteTensor` declares a `device` and `dtype` (defaults: `cpu`, `torch.float32`). `f` must return tensors on that exact device and with that exact dtype (`DeviceMismatchError` / `DtypeMismatchError` otherwise). Upstream arg slices are **not** auto-transferred; move or cast them inside `f` if they come from a different device/dtype.
 4. **Finite dimensions must fit in memory**: non-`None` dims are materialized whole whenever a window touches them.
-5. **Reconnecting**: to reuse stored data, re-construct the tensor with the same `tensor_id` against the same store. The store validates that `to_json()` matches what it saw before and raises `ValidationError` on mismatch.
-6. **Avoid manual slicing of dependencies**: use `args` / `args_windows`. Manual indexing inside `f` defeats batching and future memory-management optimizations.
-7. **Exploding compute**: `_ensure_processed` recurses into every upstream's window grid with the arg window's pixel bounds. Each chained tensor expands the "cone of interest" by its padding/offset. A deep chain with even modest overlap can detonate the amount of work a single slice triggers. Keep chains shallow and prefer a single fused `f` over many thin layers.
-8. **Immutability of persistent stores**: a processed window on `HDF5TileStore` cannot be un-processed without `tile_store.clear_tensor(uuid)`.
+5. **Reconnecting**: to reuse stored data, re-construct the tensor with the same `tensor_id` against the same store. Its saved configuration must still match, or construction raises `ValidationError`.
+6. **Avoid manual slicing of dependencies**: use `args` / `args_windows`. Manual indexing inside `f` bypasses batching and can trigger extra work.
+7. **Exploding compute**: each layer in a dependency chain can enlarge the region that has to be read from upstream, especially when windows overlap or include padding. A deep chain can make a small output slice trigger much more work than expected. Keep chains shallow when possible, and prefer one larger `f` over many thin layers if performance becomes a problem.
+8. **Immutability of persistent stores**: once data is saved in `HDF5TileStore`, you cannot mark it as missing again without deleting that tensor's stored state with `tile_store.clear_tensor(...)`.
 
 ## Public exceptions
 
@@ -320,11 +327,10 @@ All live at `infinite_tensor` top level:
 | Exception             | Raised when                                                                                     |
 | --------------------- | ----------------------------------------------------------------------------------------------- |
 | `InfiniteTensorError` | base class for everything below                                                                 |
-| `ValidationError`     | constructor param validation, metadata mismatch on re-registration, unsupported dtype migration |
+| `ValidationError`     | invalid constructor arguments, reconnecting with a different saved configuration, unsupported dtype migration |
 | `ShapeMismatchError`  | `f` returned a tensor whose shape differs from `TensorWindow.size`                              |
 | `DeviceMismatchError` | `f` returned a tensor on a different device than the tensor was declared with                   |
 | `DtypeMismatchError`  | `f` returned a tensor with a different dtype than the tensor was declared with                  |
-| `TileAccessError`     | internal: a tile was requested for read but never processed (indicates a store-consistency bug) |
 
 
 ## Example
