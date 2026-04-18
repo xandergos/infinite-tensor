@@ -15,12 +15,13 @@ from infinite_tensor.utils import standardize_indices
 # window space - Each point is a window of pixels (sliding-window index for f).
 
 DEFAULT_DTYPE = torch.float32
+DEFAULT_DEVICE = torch.device("cpu")
 
 # ERROR MESSAGES
 TILE_DELETED_ERROR_MSG = "Tile has been deleted. This indicates either a bug or an attempt to access a tensor after cleanup."
 SHAPE_MISMATCH_ERROR_MSG = "Value shape {actual} does not match indexed shape {expected}"
 OUTPUT_SHAPE_ERROR_MSG = "Function output shape {actual} does not match expected window shape {expected}"
-DEVICE_MISMATCH_ERROR_MSG = "Device mismatch: value is on {actual}, but infinite tensors require CPU tensors."
+DEVICE_MISMATCH_ERROR_MSG = "Function output is on device {actual}, tensor declared device {expected}."
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,11 @@ class TileAccessError(InfiniteTensorError):
 
 class ShapeMismatchError(InfiniteTensorError):
     """Raised when tensor shapes don't match expected dimensions."""
+    pass
+
+
+class DeviceMismatchError(InfiniteTensorError):
+    """Raised when a tensor produced by ``f`` is on a different device than declared."""
     pass
 
 
@@ -59,6 +65,76 @@ def _str_to_dtype(name: str) -> torch.dtype:
     if dt is None:
         raise ValueError(f"Unknown torch dtype: {name}")
     return dt
+
+
+def _device_to_str(device: torch.device) -> str:
+    """Serialize a torch.device to a canonical string (e.g., 'cpu', 'cuda:0')."""
+    return str(device)
+
+
+def _str_to_device(name: str) -> torch.device:
+    """Deserialize a device string back to torch.device."""
+    return torch.device(name)
+
+
+def _normalize_device(device: torch.device | str) -> torch.device:
+    """Resolve ``device`` to the concrete device PyTorch actually places tensors on.
+
+    ``torch.device("cuda")`` and ``torch.device("cuda:0")`` compare unequal, but
+    ``torch.ones((), device="cuda").device`` is ``cuda:0``. We normalize up front
+    so the output-device check in ``_process_windows`` stays a plain ``==``.
+    """
+    resolved = device if isinstance(device, torch.device) else torch.device(device)
+    if resolved.type == "cpu" or resolved.index is not None:
+        return resolved
+    return torch.zeros((), device=resolved).device
+
+
+def _parse_to_args(*args, **kwargs) -> tuple[Optional[torch.device], Optional[torch.dtype]]:
+    """Parse ``torch.Tensor.to``-style arguments into ``(device, dtype)``.
+
+    Accepts any of:
+        - ``.to(device)`` where ``device`` is ``torch.device`` or ``str``
+        - ``.to(dtype)`` where ``dtype`` is ``torch.dtype``
+        - ``.to(other)`` where ``other`` is a ``torch.Tensor`` (copies its ``device`` and ``dtype``)
+        - ``.to(device, dtype)`` positional
+        - ``.to(device=..., dtype=...)`` keyword
+
+    Returns ``(device_or_None, dtype_or_None)``. Raises ``TypeError`` on duplicates or
+    unrecognized arguments.
+    """
+    device: Optional[torch.device] = kwargs.pop("device", None)
+    dtype: Optional[torch.dtype] = kwargs.pop("dtype", None)
+    if kwargs:
+        raise TypeError(f"Unexpected keyword arguments to .to(): {list(kwargs)}")
+
+    if device is not None and not isinstance(device, (torch.device, str)):
+        raise TypeError(f"device must be torch.device or str, got {type(device)}")
+    if dtype is not None and not isinstance(dtype, torch.dtype):
+        raise TypeError(f"dtype must be torch.dtype, got {type(dtype)}")
+
+    for arg in args:
+        if isinstance(arg, torch.Tensor):
+            if device is not None or dtype is not None:
+                raise TypeError(
+                    ".to(tensor) cannot be combined with device/dtype arguments"
+                )
+            device = arg.device
+            dtype = arg.dtype
+        elif isinstance(arg, torch.dtype):
+            if dtype is not None:
+                raise TypeError("dtype specified more than once to .to()")
+            dtype = arg
+        elif isinstance(arg, (torch.device, str)):
+            if device is not None:
+                raise TypeError("device specified more than once to .to()")
+            device = arg
+        else:
+            raise TypeError(f"Unsupported argument to .to(): {arg!r}")
+
+    if device is not None and not isinstance(device, torch.device):
+        device = torch.device(device)
+    return device, dtype
 
 
 def _validate_shape(shape: tuple) -> None:
@@ -127,6 +203,7 @@ class InfiniteTensor:
         args: tuple = None,
         args_windows=None,
         dtype: torch.dtype = DEFAULT_DTYPE,
+        device: torch.device | str = DEFAULT_DEVICE,
         tile_store: Optional[TileStore] = None,
         tensor_id: Optional[Any] = None,
         batch_size: Optional[int] = None,
@@ -144,6 +221,10 @@ class InfiniteTensor:
             args_windows: One ``TensorWindow`` per entry of ``args``, describing
                 how much of each upstream to slice for each window.
             dtype: Element dtype. Defaults to ``torch.float32``.
+            device: Device on which ``f`` must return its outputs and on which
+                :meth:`__getitem__` will return. Defaults to CPU. ``f`` is
+                responsible for transferring upstream arg slices onto this
+                device if they live elsewhere.
             tile_store: Store backing this tensor. Auto-creates a
                 :class:`MemoryTileStore` (unbounded cache) if omitted. Pass a
                 store constructed with explicit ``cache_size_*`` to enable
@@ -181,6 +262,7 @@ class InfiniteTensor:
 
         self._shape = shape
         self._dtype = dtype
+        self._device = _normalize_device(device)
         self._f = f
         self._args = normalized_args
         self._args_windows = normalized_args_windows
@@ -200,6 +282,10 @@ class InfiniteTensor:
     @property
     def dtype(self) -> torch.dtype:
         return self._dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self._device
 
     @property
     def f(self) -> Callable:
@@ -224,6 +310,35 @@ class InfiniteTensor:
     def clear_cache(self) -> None:
         """Drop regeneratable cached state for this tensor in the backing store."""
         self._store.clear_cache(self._uuid)
+
+    def to(self, *args, **kwargs) -> "InfiniteTensor":
+        """Move this tensor's device and/or dtype in place, torch-style.
+
+        Accepts any of ``.to(device)``, ``.to(dtype)``, ``.to(other_tensor)``,
+        ``.to(device, dtype)``, or keyword forms (``device=``, ``dtype=``).
+
+        The tensor's declared device/dtype is updated immediately; the backing
+        :class:`TileStore` is then asked to migrate any cached state via
+        :meth:`TileStore.migrate`. Stores that cannot support the migration
+        (e.g. persistent stores on a dtype change) raise; this tensor's
+        declared device/dtype is rolled back before the exception propagates.
+        Returns ``self`` in all success paths.
+        """
+        target_device, target_dtype = _parse_to_args(*args, **kwargs)
+        new_device = (
+            _normalize_device(target_device) if target_device is not None else self._device
+        )
+        new_dtype = target_dtype if target_dtype is not None else self._dtype
+        if new_device == self._device and new_dtype == self._dtype:
+            return self
+        old_device, old_dtype = self._device, self._dtype
+        self._device, self._dtype = new_device, new_dtype
+        try:
+            self._store.migrate(self._uuid, old_device, old_dtype)
+        except Exception:
+            self._device, self._dtype = old_device, old_dtype
+            raise
+        return self
 
     def __getitem__(self, indices: tuple[int | slice, ...]) -> torch.Tensor:
         """Return tensor values for the requested pixel-space indices."""
@@ -302,6 +417,12 @@ class InfiniteTensor:
                             actual=output.shape, expected=expected_shape
                         )
                     )
+                if output.device != self._device:
+                    raise DeviceMismatchError(
+                        DEVICE_MISMATCH_ERROR_MSG.format(
+                            actual=output.device, expected=self._device
+                        )
+                    )
                 self._store.notify_window_processed(self._uuid, window_index, output)
                 logger.debug(f"Processed window {window_index}")
         else:
@@ -323,6 +444,12 @@ class InfiniteTensor:
                         raise ShapeMismatchError(
                             OUTPUT_SHAPE_ERROR_MSG.format(
                                 actual=output.shape, expected=expected_shape
+                            )
+                        )
+                    if output.device != self._device:
+                        raise DeviceMismatchError(
+                            DEVICE_MISMATCH_ERROR_MSG.format(
+                                actual=output.device, expected=self._device
                             )
                         )
                     self._store.notify_window_processed(self._uuid, window_index, output)
@@ -351,6 +478,7 @@ class InfiniteTensor:
         return {
             'shape': list(self.shape),
             'dtype': _dtype_to_str(self.dtype),
+            'device': _device_to_str(self.device),
             'args': [a.uuid for a in self.args],
             'args_windows': [window_to_dict(w) for w in self.args_windows],
             'output_window': self.output_window.to_dict(),

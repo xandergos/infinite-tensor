@@ -325,6 +325,15 @@ class PersistentTileStore(TileStore):
             return self._tile_cache[key]
         return None
 
+    def _materialize_tile(self, tensor_id: str, tile: torch.Tensor) -> torch.Tensor:
+        """Return ``tile`` on the registered tensor's device (no-op if already matching)."""
+        tensor = self._tensor_store.get(tensor_id)
+        if tensor is None:
+            return tile
+        if tile.device == tensor.device:
+            return tile
+        return tile.to(tensor.device)
+
     def _load_tile(
         self, tensor_id: str, tile_index: tuple[int, ...]
     ) -> Optional[torch.Tensor]:
@@ -334,6 +343,7 @@ class PersistentTileStore(TileStore):
             return cached
         tile = self._read_tile(tensor_id, tile_index)
         if tile is not None:
+            tile = self._materialize_tile(tensor_id, tile)
             self._cache_tile(tensor_id, tile_index, tile)
         return tile
 
@@ -398,8 +408,6 @@ class PersistentTileStore(TileStore):
         output: torch.Tensor,
     ) -> None:
         """Accumulate ``output`` into the covered tiles and mark the window processed."""
-        from infinite_tensor.infinite_tensor import DEVICE_MISMATCH_ERROR_MSG
-
         tensor = self._tensor_store[tensor_id]
         tensor_shape = tensor.shape
         tile_size_tuple = self._tile_size_cache[tensor_id]
@@ -418,7 +426,9 @@ class PersistentTileStore(TileStore):
         for tile_index in itertools.product(*tile_ranges):
             tile = self._load_tile(tensor_id, tile_index)
             if tile is None:
-                tile = torch.zeros(tile_shape, dtype=tensor.dtype)
+                tile = torch.zeros(
+                    tile_shape, dtype=tensor.dtype, device=tensor.device
+                )
 
             intersected = self._intersect_slices(
                 tensor_shape, tile_size_tuple, pixel_bounds, tile_index
@@ -434,8 +444,6 @@ class PersistentTileStore(TileStore):
                 for s, b in zip(intersected, pixel_bounds)
             )
 
-            if tile.device != output.device:
-                raise ValueError(DEVICE_MISMATCH_ERROR_MSG.format(actual=output.device))
             tile[tile_local] += output[value_local]
             self._store_tile(tensor_id, tile_index, tile)
 
@@ -462,7 +470,9 @@ class PersistentTileStore(TileStore):
         output_shape = tuple(
             max((s.stop - s.start - 1) // s.step + 1, 0) for s in pixel_slices
         )
-        output_tensor = torch.empty(output_shape, dtype=tensor.dtype)
+        output_tensor = torch.empty(
+            output_shape, dtype=tensor.dtype, device=tensor.device
+        )
 
         tile_range_slices = self._pixel_slices_to_tile_ranges(
             tensor_shape, tile_size_tuple, pixel_slices
@@ -489,6 +499,38 @@ class PersistentTileStore(TileStore):
             output_tensor[output_indices] = tile[tile_local]
 
         return output_tensor
+
+    def migrate(
+        self,
+        tensor_id: str,
+        old_device: torch.device,
+        old_dtype: torch.dtype,
+    ) -> None:
+        """Migrate ``tensor_id`` after a ``.to()``; persistent stores forbid dtype changes.
+
+        Raises :class:`ValidationError` (before any side effects) if the new
+        dtype differs from ``old_dtype``. Otherwise drops this tensor's cached
+        tiles so they are re-materialized on the new device next read, and
+        rewrites the persisted metadata so the on-disk ``to_json`` matches the
+        new declared device.
+        """
+        from infinite_tensor.infinite_tensor import ValidationError
+
+        tensor = self._tensor_store.get(tensor_id)
+        if tensor is None:
+            return
+        if tensor.dtype != old_dtype:
+            raise ValidationError(
+                f"Persistent stores do not support dtype changes for tensor {tensor_id}; "
+                f"clear the tensor and re-create it to change dtype"
+            )
+        if tensor.device != old_device:
+            for key in [k for k in self._tile_cache if k[0] == tensor_id]:
+                del self._tile_cache[key]
+        self._write_tensor_metadata(
+            tensor_id, tensor.to_json(), self._tile_size_cache[tensor_id]
+        )
+        self.flush()
 
     def __enter__(self):
         return self

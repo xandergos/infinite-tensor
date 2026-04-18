@@ -90,6 +90,27 @@ class TileStore(abc.ABC):
         """
         ...
 
+    @abc.abstractmethod
+    def migrate(
+        self,
+        tensor_id: str,
+        old_device: torch.device,
+        old_dtype: torch.dtype,
+    ) -> None:
+        """Migrate stored state for ``tensor_id`` after a ``.to()`` call.
+
+        The caller (``InfiniteTensor.to``) has already updated the registered
+        tensor's ``device`` and ``dtype`` to their new values; implementations
+        inspect those (via the registered instance) along with the supplied
+        ``old_device`` / ``old_dtype`` to decide what storage updates are
+        needed.
+
+        Implementations must raise (typically ``ValidationError``) on
+        transitions they cannot support, **before** any side effects, so the
+        caller can roll back the tensor's declared device/dtype.
+        """
+        ...
+
 
 def _tensor_bytes(tensor: torch.Tensor) -> int:
     """Return the size in bytes of ``tensor``'s storage (elements only)."""
@@ -222,7 +243,9 @@ class MemoryTileStore(TileStore):
         output_shape = tuple(
             max((s.stop - s.start - 1) // s.step + 1, 0) for s in pixel_slices
         )
-        output_tensor = torch.zeros(output_shape, dtype=tensor.dtype)
+        output_tensor = torch.zeros(
+            output_shape, dtype=tensor.dtype, device=tensor.device
+        )
 
         for window_index in output_window.intersecting_windows(pixel_slices):
             window_output = self._fetch_window(tensor_id, window_index)
@@ -251,6 +274,28 @@ class MemoryTileStore(TileStore):
             output_tensor[output_indices] += window_output[window_local_indices]
 
         return output_tensor
+
+    def migrate(
+        self,
+        tensor_id: str,
+        old_device: torch.device,
+        old_dtype: torch.dtype,
+    ) -> None:
+        """Cast/move every cached window for ``tensor_id`` to the tensor's new device/dtype."""
+        tensor = self._tensor_store.get(tensor_id)
+        if tensor is None:
+            return
+        new_device = tensor.device
+        new_dtype = tensor.dtype
+        if new_device == old_device and new_dtype == old_dtype:
+            return
+        for key, window in list(self._windows.items()):
+            if key[0] != tensor_id:
+                continue
+            self._bytes -= _tensor_bytes(window)
+            migrated = window.to(device=new_device, dtype=new_dtype)
+            self._windows[key] = migrated
+            self._bytes += _tensor_bytes(migrated)
 
 
 from infinite_tensor.tilestore.persistent import PersistentTileStore

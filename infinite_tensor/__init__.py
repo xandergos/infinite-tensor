@@ -1,4 +1,11 @@
-from .infinite_tensor import InfiniteTensor
+from .infinite_tensor import (
+    InfiniteTensor,
+    InfiniteTensorError,
+    TileAccessError,
+    ShapeMismatchError,
+    DeviceMismatchError,
+    ValidationError,
+)
 from .tensor_window import TensorWindow
 from .tilestore import MemoryTileStore, PersistentTileStore
 from importlib.metadata import PackageNotFoundError, version
@@ -17,6 +24,11 @@ except PackageNotFoundError:
 
 __all__ = [
     'InfiniteTensor',
+    'InfiniteTensorError',
+    'TileAccessError',
+    'ShapeMismatchError',
+    'DeviceMismatchError',
+    'ValidationError',
     'TensorWindow',
     'MemoryTileStore',
     'PersistentTileStore',

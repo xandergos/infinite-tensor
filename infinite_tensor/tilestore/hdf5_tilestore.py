@@ -11,6 +11,12 @@ Stores each registered tensor as an HDF5 group
 Write-once per window: once ``notify_window_processed`` records a window it
 cannot be un-processed. ``clear_tensor`` is the only way to wipe per-tensor
 state.
+
+Device handling is transparent: tiles are always serialized to HDF5 as CPU
+numpy arrays, and are transferred onto the registered tensor's declared
+device when loaded (see :meth:`PersistentTileStore._materialize_tile`). This
+backend therefore supports any ``torch.device`` on the owning
+:class:`InfiniteTensor`.
 """
 
 import json
