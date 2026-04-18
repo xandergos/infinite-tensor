@@ -94,7 +94,8 @@ def _parse_to_args(*args, **kwargs) -> tuple[Optional[torch.device], Optional[to
     """Parse ``torch.Tensor.to``-style arguments into ``(device, dtype)``.
 
     Accepts any of:
-        - ``.to(device)`` where ``device`` is ``torch.device`` or ``str``
+        - ``.to(device)`` where ``device`` is ``torch.device``, ``str``, or an
+          ``int`` CUDA index (``.to(0)`` → ``cuda:0``, matching ``torch.Tensor.to``)
         - ``.to(dtype)`` where ``dtype`` is ``torch.dtype``
         - ``.to(other)`` where ``other`` is a ``torch.Tensor`` (copies its ``device`` and ``dtype``)
         - ``.to(device, dtype)`` positional
@@ -103,13 +104,18 @@ def _parse_to_args(*args, **kwargs) -> tuple[Optional[torch.device], Optional[to
     Returns ``(device_or_None, dtype_or_None)``. Raises ``TypeError`` on duplicates or
     unrecognized arguments.
     """
-    device: Optional[torch.device] = kwargs.pop("device", None)
+    device: Any = kwargs.pop("device", None)
     dtype: Optional[torch.dtype] = kwargs.pop("dtype", None)
     if kwargs:
         raise TypeError(f"Unexpected keyword arguments to .to(): {list(kwargs)}")
 
-    if device is not None and not isinstance(device, (torch.device, str)):
-        raise TypeError(f"device must be torch.device or str, got {type(device)}")
+    def _is_device_like(value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        return isinstance(value, (torch.device, str, int))
+
+    if device is not None and not _is_device_like(device):
+        raise TypeError(f"device must be torch.device, str, or int, got {type(device)}")
     if dtype is not None and not isinstance(dtype, torch.dtype):
         raise TypeError(f"dtype must be torch.dtype, got {type(dtype)}")
 
@@ -125,14 +131,16 @@ def _parse_to_args(*args, **kwargs) -> tuple[Optional[torch.device], Optional[to
             if dtype is not None:
                 raise TypeError("dtype specified more than once to .to()")
             dtype = arg
-        elif isinstance(arg, (torch.device, str)):
+        elif _is_device_like(arg):
             if device is not None:
                 raise TypeError("device specified more than once to .to()")
             device = arg
         else:
             raise TypeError(f"Unsupported argument to .to(): {arg!r}")
 
-    if device is not None and not isinstance(device, torch.device):
+    if isinstance(device, int):
+        device = torch.device("cuda", device)
+    elif isinstance(device, str):
         device = torch.device(device)
     return device, dtype
 

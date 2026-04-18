@@ -327,6 +327,14 @@ class MemoryTileStore(TileStore):
             for req_slice, win_slice in zip(pixel_slices, window_bounds):
                 start = max(req_slice.start, win_slice.start)
                 stop = min(req_slice.stop, win_slice.stop)
+                if req_slice.step > 1 and start < stop:
+                    offset = (start - req_slice.start) % req_slice.step
+                    if offset:
+                        start += req_slice.step - offset
+                    if start < stop:
+                        trailing = (stop - 1 - req_slice.start) % req_slice.step
+                        if trailing:
+                            stop -= trailing
                 intersected.append(slice(start, stop, req_slice.step))
 
             if any(s.start >= s.stop for s in intersected):

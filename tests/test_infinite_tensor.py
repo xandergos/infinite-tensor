@@ -373,3 +373,61 @@ class TestInfiniteTensorIntegration:
         tensor.clear_cache()
         _ = tensor[:, 0:64, 0:64]
         assert call_count["n"] == first_calls + 1
+
+
+class TestSteppedSlicing:
+    """Stepped reads must produce the same values as a dense read then stride."""
+
+    @pytest.mark.parametrize("step", [2, 3, 4, 5, 7])
+    def test_stepped_read_across_window_boundary_matches_dense(self, step):
+        """Reads with step > 1 that span multiple windows must not crash or skew.
+
+        Regression test for a MemoryTileStore.read_pixels bug where the
+        intersection of the request with each window's bounds was not
+        step-aligned, producing either a shape mismatch at assembly time or
+        mis-assigned pixels when windows were sampled at unaligned offsets.
+        """
+        from infinite_tensor.tilestore import MemoryTileStore
+
+        window_size = 5
+        window = TensorWindow((window_size, window_size))
+
+        def unique_per_window(ctx, w=window_size):
+            row_index, col_index = ctx
+            base = torch.arange(w * w, dtype=torch.float32).reshape(w, w)
+            return base + row_index * 10_000 + col_index * 100
+
+        tensor = InfiniteTensor(
+            (None, None),
+            unique_per_window,
+            window,
+            tile_store=MemoryTileStore(),
+            tensor_id=uuid.uuid4(),
+        )
+
+        stop = window_size * 3
+        stepped = tensor[0:stop:step, 0:stop:step]
+        dense = tensor[0:stop, 0:stop][::step, ::step]
+        assert tuple(stepped.shape) == tuple(dense.shape)
+        assert torch.equal(stepped, dense)
+
+    def test_stepped_read_single_window_still_works(self):
+        """The single-window path must also stay correct with step > 1."""
+        from infinite_tensor.tilestore import MemoryTileStore
+
+        window = TensorWindow((8, 8))
+
+        def f(ctx):
+            return torch.arange(64, dtype=torch.float32).reshape(8, 8)
+
+        tensor = InfiniteTensor(
+            (None, None),
+            f,
+            window,
+            tile_store=MemoryTileStore(),
+            tensor_id=uuid.uuid4(),
+        )
+
+        result = tensor[0:8:3, 0:8:3]
+        expected = torch.arange(64, dtype=torch.float32).reshape(8, 8)[::3, ::3]
+        assert torch.equal(result, expected)

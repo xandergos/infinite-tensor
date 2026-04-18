@@ -198,6 +198,30 @@ class TestToSignature:
         with pytest.raises(TypeError):
             tensor.to(other, dtype=torch.float64)
 
+    def test_int_positional_parsed_as_cuda_index(self):
+        """``.to(0)`` must resolve to ``cuda:0`` like ``torch.Tensor.to`` does."""
+        from infinite_tensor.infinite_tensor import _parse_to_args
+
+        device, dtype = _parse_to_args(0)
+        assert device == torch.device("cuda", 0)
+        assert dtype is None
+
+    def test_int_device_kwarg_parsed_as_cuda_index(self):
+        from infinite_tensor.infinite_tensor import _parse_to_args
+
+        device, dtype = _parse_to_args(device=2)
+        assert device == torch.device("cuda", 2)
+        assert dtype is None
+
+    def test_bool_rejected_as_device(self):
+        """``bool`` is an ``int`` subclass; reject it explicitly so ``.to(True)`` fails."""
+        from infinite_tensor.infinite_tensor import _parse_to_args
+
+        with pytest.raises(TypeError):
+            _parse_to_args(True)
+        with pytest.raises(TypeError):
+            _parse_to_args(device=False)
+
 
 class TestToMemoryDtype:
     """Dtype migration on MemoryTileStore casts cached windows in place."""

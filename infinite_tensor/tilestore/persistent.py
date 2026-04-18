@@ -28,16 +28,11 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from infinite_tensor.tilestore import TileStore
+from infinite_tensor.tilestore import TileStore, _tensor_bytes
 
 
 DEFAULT_TILE_SIZE = 512
 DEFAULT_CACHE_SIZE_BYTES = 100 * 1024 * 1024
-
-
-def _tensor_bytes(tensor: torch.Tensor) -> int:
-    """Return the size in bytes of ``tensor``'s storage (elements only)."""
-    return tensor.numel() * tensor.element_size()
 
 
 class PersistentTileStore(TileStore):

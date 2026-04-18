@@ -20,7 +20,6 @@ backend therefore supports any ``torch.device`` on the owning
 """
 
 import json
-import logging
 from pathlib import Path
 from typing import Optional
 
@@ -38,9 +37,6 @@ try:
 except ImportError:
     HAS_H5PY = False
     h5py = None
-
-
-logger = logging.getLogger(__name__)
 
 
 class HDF5TileStore(PersistentTileStore):
