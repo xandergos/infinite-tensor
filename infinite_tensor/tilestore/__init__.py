@@ -13,7 +13,6 @@ The only interface between an InfiniteTensor and its store is:
 """
 
 import abc
-import itertools
 from collections import OrderedDict
 from typing import Any, Dict, Optional
 
@@ -225,11 +224,7 @@ class MemoryTileStore(TileStore):
         )
         output_tensor = torch.zeros(output_shape, dtype=tensor.dtype)
 
-        lowest = output_window.get_lowest_intersection(pixel_slices)
-        highest = output_window.get_highest_intersection(pixel_slices)
-        window_ranges = [range(lo, hi + 1) for lo, hi in zip(lowest, highest)]
-
-        for window_index in itertools.product(*window_ranges):
+        for window_index in output_window.intersecting_windows(pixel_slices):
             window_output = self._fetch_window(tensor_id, window_index)
             window_bounds = output_window.get_bounds(window_index)
 

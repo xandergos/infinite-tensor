@@ -248,15 +248,7 @@ class InfiniteTensor:
     def _ensure_processed_range(self, pixel_ranges: Iterable[tuple[slice, ...]]) -> None:
         """Ensure every window intersecting ``pixel_ranges`` is processed in the store."""
         all_indices = itertools.chain.from_iterable(
-            itertools.product(
-                *[
-                    range(lo, hi + 1)
-                    for lo, hi in zip(
-                        self.output_window.get_lowest_intersection(sub_range),
-                        self.output_window.get_highest_intersection(sub_range),
-                    )
-                ]
-            )
+            self.output_window.intersecting_windows(sub_range)
             for sub_range in pixel_ranges
         )
         self._ensure_processed(all_indices)
