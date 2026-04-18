@@ -5,7 +5,7 @@ import uuid
 import pytest
 import torch
 
-from infinite_tensor import InfiniteTensor, TensorWindow
+from infinite_tensor import DtypeMismatchError, InfiniteTensor, TensorWindow
 
 
 class TestInfiniteTensorBasics:
@@ -225,6 +225,47 @@ class TestInfiniteTensorEdgeCases:
 
         _ = tensor[0:8, 0:tile_size]
         assert call_count["n"] == 0
+
+    def test_function_output_wrong_dtype_raises(self, tile_store):
+        """Non-batched path raises DtypeMismatchError when ``f`` returns the wrong dtype."""
+
+        def wrong_dtype(ctx):
+            return torch.ones((64, 64), dtype=torch.float64)
+
+        tensor = InfiniteTensor(
+            shape=(None, None),
+            f=wrong_dtype,
+            output_window=TensorWindow((64, 64)),
+            dtype=torch.float32,
+            tile_store=tile_store,
+            tensor_id=str(uuid.uuid4()),
+        )
+        with pytest.raises(DtypeMismatchError) as excinfo:
+            _ = tensor[0:64, 0:64]
+        message = str(excinfo.value)
+        assert "float64" in message
+        assert "float32" in message
+
+    def test_function_output_wrong_dtype_raises_batched(self, tile_store):
+        """Batched path raises DtypeMismatchError when ``f`` returns the wrong dtype."""
+
+        def wrong_dtype_batched(ctxs):
+            return [torch.ones((64, 64), dtype=torch.float64) for _ in ctxs]
+
+        tensor = InfiniteTensor(
+            shape=(None, None),
+            f=wrong_dtype_batched,
+            output_window=TensorWindow((64, 64)),
+            dtype=torch.float32,
+            tile_store=tile_store,
+            tensor_id=str(uuid.uuid4()),
+            batch_size=2,
+        )
+        with pytest.raises(DtypeMismatchError) as excinfo:
+            _ = tensor[0:128, 0:64]
+        message = str(excinfo.value)
+        assert "float64" in message
+        assert "float32" in message
 
 
 class TestInfiniteTensorIntegration:

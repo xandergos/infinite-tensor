@@ -2,6 +2,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from .infinite_tensor import (
     DeviceMismatchError,
+    DtypeMismatchError,
     InfiniteTensor,
     InfiniteTensorError,
     ShapeMismatchError,
@@ -30,6 +31,7 @@ __all__ = [
     "TileAccessError",
     "ShapeMismatchError",
     "DeviceMismatchError",
+    "DtypeMismatchError",
     "ValidationError",
     "TensorWindow",
     "MemoryTileStore",
