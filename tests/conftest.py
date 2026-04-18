@@ -1,11 +1,13 @@
 """Shared test fixtures and configuration for infinite tensor tests."""
 
+import uuid
+
+import numpy as np
 import pytest
 import torch
-import numpy as np
-from infinite_tensor import TensorWindow
+
+from infinite_tensor import InfiniteTensor, TensorWindow
 from infinite_tensor.tilestore import MemoryTileStore
-import uuid
 
 
 @pytest.fixture
@@ -14,18 +16,18 @@ def torch_random_seed():
     torch.manual_seed(42)
     np.random.seed(42)
     yield
-    # No cleanup needed for seeds
 
 
 @pytest.fixture
 def basic_tensor_window():
     """Standard tensor window for testing."""
     return TensorWindow((10, 512, 512))
+
+
 @pytest.fixture
 def tile_store():
     """Shared in-memory tile store for tests."""
     return MemoryTileStore()
-
 
 
 @pytest.fixture
@@ -77,31 +79,34 @@ def increment_func():
 @pytest.fixture
 def basic_infinite_tensor(ones_tensor_func, basic_tensor_window, tile_store):
     """Create a basic infinite tensor for testing."""
-    return tile_store.get_or_create(
-        uuid.uuid4(),
+    return InfiniteTensor(
         (10, None, None),
         ones_tensor_func,
         basic_tensor_window,
+        tile_store=tile_store,
+        tensor_id=uuid.uuid4(),
     )
 
 
 @pytest.fixture
 def random_infinite_tensor(base_tensor_func, basic_tensor_window, torch_random_seed, tile_store):
     """Create a random infinite tensor for testing."""
-    return tile_store.get_or_create(
-        uuid.uuid4(),
+    return InfiniteTensor(
         (10, None, None),
         base_tensor_func,
         basic_tensor_window,
+        tile_store=tile_store,
+        tensor_id=uuid.uuid4(),
     )
 
 
 @pytest.fixture
 def zeros_infinite_tensor(zeros_tensor_func, basic_tensor_window, tile_store):
     """Create a zeros infinite tensor for testing."""
-    return tile_store.get_or_create(
-        uuid.uuid4(),
+    return InfiniteTensor(
         (10, None, None),
         zeros_tensor_func,
         basic_tensor_window,
+        tile_store=tile_store,
+        tensor_id=uuid.uuid4(),
     )

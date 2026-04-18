@@ -1,6 +1,6 @@
 from .infinite_tensor import InfiniteTensor
 from .tensor_window import TensorWindow
-from .tilestore import MemoryTileStore
+from .tilestore import MemoryTileStore, PersistentTileStore
 from importlib.metadata import PackageNotFoundError, version
 
 # Optional HDF5 support
@@ -19,6 +19,7 @@ __all__ = [
     'InfiniteTensor',
     'TensorWindow',
     'MemoryTileStore',
+    'PersistentTileStore',
 ]
 
 if _HAS_HDF5:

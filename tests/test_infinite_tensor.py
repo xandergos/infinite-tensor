@@ -1,35 +1,32 @@
 """Comprehensive tests for InfiniteTensor functionality using pytest."""
 
+import uuid
+
 import pytest
 import torch
-import numpy as np
-from infinite_tensor import TensorWindow
-from infinite_tensor.tilestore import MemoryTileStore
-import uuid
+
+from infinite_tensor import InfiniteTensor, TensorWindow
 
 
 class TestInfiniteTensorBasics:
     """Test basic InfiniteTensor functionality."""
-    
+
     def test_tensor_initialization(self, basic_infinite_tensor):
         """Test that InfiniteTensor initializes correctly."""
         assert basic_infinite_tensor is not None
         assert basic_infinite_tensor.shape == (10, None, None)
-    
+
     def test_tensor_slicing_shapes(self, basic_infinite_tensor):
         """Test various slicing operations return correct shapes."""
-        # Test single slice
         result = basic_infinite_tensor[0, 0:512, 0:512]
         assert tuple(result.shape) == (512, 512)
-        
-        # Test large slice
+
         result = basic_infinite_tensor[:, -1024:1024, -1024:1024]
         assert tuple(result.shape) == (10, 2048, 2048)
-        
-        # Test partial slice
+
         result = basic_infinite_tensor[:5, -512:512, -512:512]
         assert tuple(result.shape) == (5, 1024, 1024)
-    
+
     def test_tensor_values(self, basic_infinite_tensor):
         """Test that tensor returns expected values."""
         result = basic_infinite_tensor[0, 0:512, 0:512]
@@ -39,55 +36,55 @@ class TestInfiniteTensorBasics:
 
 class TestInfiniteTensorDependencies:
     """Test InfiniteTensor dependency functionality."""
-    
+
     def test_simple_dependency(self, random_infinite_tensor, dependency_func, basic_tensor_window, tile_store):
         """Test basic tensor dependency operations."""
-        # Create dependent tensor; capture upstream tensor via closure
         def dep_func(ctx, base=random_infinite_tensor, w=basic_tensor_window):
             return base[w.get_bounds(ctx)] * 2 - 1
-        dep = tile_store.get_or_create(
-            uuid.uuid4(),
+        dep = InfiniteTensor(
             (10, None, None),
             dep_func,
             basic_tensor_window,
+            tile_store=tile_store,
+            tensor_id=uuid.uuid4(),
         )
-        
-        # Test the dependency transformation
+
         result = dep[:, 0:512, 0:512]
         assert result.max() > 0.99
         assert result.min() < -0.99
         assert abs(result.mean()) < 0.01
-    
+
     def test_multiple_dependencies(self, zeros_infinite_tensor, increment_func, basic_tensor_window, tile_store):
         """Test chaining multiple dependencies."""
         dep = zeros_infinite_tensor
-        
-        # Chain 10 increment operations
+
         for i in range(10):
             def inc_func(ctx, prev=dep, w=basic_tensor_window):
                 return prev[w.get_bounds(ctx)] + 1
-            dep = tile_store.get_or_create(
-                uuid.uuid4(),
+            dep = InfiniteTensor(
                 (10, None, None),
                 inc_func,
                 basic_tensor_window,
+                tile_store=tile_store,
+                tensor_id=uuid.uuid4(),
             )
-        
+
         result = dep[:, 0:512, 0:512]
         expected = torch.full_like(result, 10.0)
         assert torch.allclose(result, expected)
-    
+
     def test_complex_dependency_with_stride(self, zeros_infinite_tensor, increment_func, strided_tensor_window, tile_store):
         """Test dependency with custom window stride."""
         def inc_stride(ctx, base=zeros_infinite_tensor, w=strided_tensor_window):
             return base[w.get_bounds(ctx)] + 1
-        dep = tile_store.get_or_create(
-            uuid.uuid4(),
+        dep = InfiniteTensor(
             (10, None, None),
             inc_stride,
             strided_tensor_window,
+            tile_store=tile_store,
+            tensor_id=uuid.uuid4(),
         )
-        
+
         result = dep[:, 0:512, 0:512]
         expected = torch.full_like(result, 4.0)
         assert torch.allclose(result, expected)
@@ -95,7 +92,7 @@ class TestInfiniteTensorDependencies:
 
 class TestInfiniteTensorParametrized:
     """Parametrized tests for various tensor configurations."""
-    
+
     @pytest.mark.parametrize("slice_config", [
         (slice(0, 1), slice(0, 256), slice(0, 256)),
         (slice(None), slice(100, 612), slice(100, 612)),
@@ -105,21 +102,20 @@ class TestInfiniteTensorParametrized:
         """Test various slicing configurations."""
         dim0_slice, dim1_slice, dim2_slice = slice_config
         result = basic_infinite_tensor[dim0_slice, dim1_slice, dim2_slice]
-        
-        # Calculate expected shape
+
         expected_shape = []
         for i, (slice_obj, orig_dim) in enumerate(zip(slice_config, basic_infinite_tensor.shape)):
-            if i == 0:  # First dimension has known size
+            if i == 0:
                 start = slice_obj.start or 0
                 stop = slice_obj.stop or 10
                 expected_shape.append(stop - start)
-            else:  # Other dimensions are infinite
+            else:
                 start = slice_obj.start or 0
                 stop = slice_obj.stop or 0
                 expected_shape.append(stop - start)
-        
+
         assert tuple(result.shape) == tuple(expected_shape)
-    
+
     @pytest.mark.parametrize("tensor_shape,window_shape", [
         ((5, None, None), (5, 256, 256)),
         ((20, None, None), (20, 1024, 1024)),
@@ -127,14 +123,18 @@ class TestInfiniteTensorParametrized:
     ])
     def test_different_tensor_configurations(self, tensor_shape, window_shape, tile_store):
         """Test different tensor and window shape configurations."""
-        # Create a function that matches the window shape
         def dynamic_tensor_func(ctx):
             return torch.ones(window_shape)
-        
+
         window = TensorWindow(window_shape)
-        tensor = tile_store.get_or_create(uuid.uuid4(), tensor_shape, dynamic_tensor_func, window)
-        
-        # Test basic functionality
+        tensor = InfiniteTensor(
+            tensor_shape,
+            dynamic_tensor_func,
+            window,
+            tile_store=tile_store,
+            tensor_id=uuid.uuid4(),
+        )
+
         result = tensor[0, 0:window_shape[1]//2, 0:window_shape[2]//2]
         expected_shape = (window_shape[1]//2, window_shape[2]//2)
         assert tuple(result.shape) == expected_shape
@@ -142,18 +142,17 @@ class TestInfiniteTensorParametrized:
 
 class TestInfiniteTensorEdgeCases:
     """Test edge cases and error conditions."""
-    
+
     def test_empty_slice(self, basic_infinite_tensor):
         """Test empty slice operations."""
         result = basic_infinite_tensor[0, 0:0, 0:0]
         assert tuple(result.shape) == (0, 0)
-    
+
     def test_negative_indexing(self, basic_infinite_tensor):
         """Test negative indexing works correctly."""
         result = basic_infinite_tensor[:, -100:100, -100:100]
         assert tuple(result.shape) == (10, 200, 200)
-        
-        # Should be all ones
+
         expected = torch.ones(10, 200, 200)
         assert torch.allclose(result, expected)
 
@@ -164,106 +163,162 @@ class TestInfiniteTensorIntegration:
     def test_multiple_slices_same_tensor(self, basic_infinite_tensor):
         """Test multiple slicing operations on the same tensor."""
         slice1 = basic_infinite_tensor[0:2, 0:100, 0:100]
-        slice2 = basic_infinite_tensor[2:4, 100:200, 100:200] 
+        slice2 = basic_infinite_tensor[2:4, 100:200, 100:200]
         slice3 = basic_infinite_tensor[:, 50:150, 50:150]
-        
-        # All should be ones
+
         assert torch.allclose(slice1, torch.ones_like(slice1))
         assert torch.allclose(slice2, torch.ones_like(slice2))
         assert torch.allclose(slice3, torch.ones_like(slice3))
-        
-        # Check shapes
+
         assert slice1.shape == (2, 100, 100)
         assert slice2.shape == (2, 100, 100)
         assert slice3.shape == (10, 100, 100)
 
-    def test_direct_cache_eviction_during_multi_window_access(self, tile_store):
-        """Test that direct caching doesn't evict windows needed for current access.
-        
-        This tests the fix for a bug where cache eviction during _apply_f would
-        evict windows before _getitem_direct could read them, causing TileAccessError.
-        """
-        window = TensorWindow((1, 64, 64))
-        
+    def test_cache_window_limit_evicts_between_accesses(self):
+        """A cache window-count limit evicts oldest entries between accesses."""
+        from infinite_tensor.tilestore import MemoryTileStore
+
+        store = MemoryTileStore(cache_size_windows=2)
+        call_count = {"n": 0}
+
+        def counting_func(ctx):
+            call_count["n"] += 1
+            return torch.ones((1, 64, 64))
+
+        tensor = InfiniteTensor(
+            (1, None, None),
+            counting_func,
+            TensorWindow((1, 64, 64)),
+            tile_store=store,
+            tensor_id=uuid.uuid4(),
+        )
+
+        _ = tensor[:, 0:64, 0:64]
+        _ = tensor[:, 64:128, 0:64]
+        _ = tensor[:, 0:64, 64:128]
+        assert call_count["n"] == 3
+        assert len(store._windows) == 2
+
+        _ = tensor[:, 0:64, 0:64]
+        assert call_count["n"] == 4
+
+    def test_deferred_eviction_during_single_access(self):
+        """A single getitem touching more windows than the cache holds must still succeed."""
+        from infinite_tensor.tilestore import MemoryTileStore
+
+        store = MemoryTileStore(cache_size_windows=1)
+
         def ones_func(ctx):
             return torch.ones((1, 64, 64))
-        
-        # Use direct caching with a very small cache limit (smaller than 2 windows)
-        # Each window is 1*64*64*4 = 16KB for float32
-        # Set limit to 20KB so only ~1 window fits, but we'll access 4 windows
-        tensor = tile_store.get_or_create(
-            uuid.uuid4(),
+
+        tensor = InfiniteTensor(
             (1, None, None),
             ones_func,
-            window,
-            cache_method='direct',
-            cache_limit=20 * 1024,
+            TensorWindow((1, 64, 64)),
+            tile_store=store,
+            tensor_id=uuid.uuid4(),
         )
-        
-        # Access a 2x2 grid of windows (128x128 region with 64x64 windows)
-        # This requires 4 windows but cache can only hold ~1
-        result = tensor[:, 0:128, 0:128]
-        
-        assert result.shape == (1, 128, 128)
-        assert torch.allclose(result, torch.ones_like(result))
 
-    def test_direct_cache_prioritizes_generated_windows(self, tile_store):
-        """Test that generated windows have higher cache priority than used windows.
-        
-        After generation, the cache order should be:
-        1. Used (dependency) windows - promoted first
-        2. Generated windows - promoted last (highest priority, evicted last)
-        """
-        window = TensorWindow((1, 64, 64))
-        
-        def base_func(ctx):
+        result = tensor[:, 0:256, 0:256]
+        assert result.shape == (1, 256, 256)
+        assert torch.allclose(result, torch.ones_like(result))
+        assert len(store._windows) == 1
+
+    def test_cache_shared_across_tensors(self):
+        """All tensors sharing a MemoryTileStore share its single LRU cache."""
+        from infinite_tensor.tilestore import MemoryTileStore
+
+        store = MemoryTileStore(cache_size_windows=3)
+
+        def ones_func(ctx):
             return torch.ones((1, 64, 64))
-        
-        # Create base tensor with direct caching
-        base = tile_store.get_or_create(
-            uuid.uuid4(),
+
+        def twos_func(ctx):
+            return torch.ones((1, 64, 64)) * 2
+
+        uuid_a = uuid.uuid4()
+        uuid_b = uuid.uuid4()
+        tensor_a = InfiniteTensor(
             (1, None, None),
-            base_func,
-            window,
-            cache_method='direct',
-            cache_limit=None,  # No limit for this test
+            ones_func,
+            TensorWindow((1, 64, 64)),
+            tile_store=store,
+            tensor_id=uuid_a,
         )
-        
-        # Pre-populate base cache with several windows
-        _ = base[:, 0:64, 0:64]    # window (0, 0, 0)
-        _ = base[:, 64:128, 0:64]  # window (0, 1, 0)
-        _ = base[:, 0:64, 64:128]  # window (0, 0, 1)
-        
-        # Create dependent tensor
-        def dep_func(ctx, upstream=base, w=window):
-            return upstream[w.get_bounds(ctx)] * 2
-        
-        dep = tile_store.get_or_create(
-            uuid.uuid4(),
+        tensor_b = InfiniteTensor(
             (1, None, None),
-            dep_func,
-            window,
-            cache_method='direct',
-            cache_limit=None,
+            twos_func,
+            TensorWindow((1, 64, 64)),
+            tile_store=store,
+            tensor_id=uuid_b,
         )
-        
-        # Access dependent tensor - this uses window (0, 0, 0) from base
-        result = dep[:, 0:64, 0:64]
-        
-        # Verify result is correct
-        assert torch.allclose(result, torch.ones((1, 64, 64)) * 2)
-        
-        # Check that base's cache has window (0, 0, 0) promoted (it was used)
-        # and dep's cache has window (0, 0, 0) at the end (it was generated)
-        base_cache = tile_store._window_cache.get(base.uuid)
-        dep_cache = tile_store._window_cache.get(dep.uuid)
-        
-        assert base_cache is not None
-        assert dep_cache is not None
-        
-        # The used window should be at the end of base's cache
-        base_keys = list(base_cache.keys())
-        assert (0, 0, 0) == base_keys[-1]
-        
-        # The generated window should be in dep's cache
-        assert (0, 0, 0) in dep_cache
+
+        _ = tensor_a[:, 0:64, 0:64]
+        _ = tensor_a[:, 64:128, 0:64]
+        _ = tensor_b[:, 0:64, 0:64]
+        assert len(store._windows) == 3
+
+        _ = tensor_b[:, 64:128, 0:64]
+        assert len(store._windows) == 3
+        assert (str(uuid_a), (0, 0, 0)) not in store._windows
+        assert (str(uuid_b), (0, 1, 0)) in store._windows
+
+    def test_cache_protected_while_any_tensor_active(self):
+        """Eviction must wait until every active begin_access has ended."""
+        from infinite_tensor.tilestore import MemoryTileStore
+
+        store = MemoryTileStore(cache_size_windows=1)
+
+        def ones_func(ctx):
+            return torch.ones((1, 64, 64))
+
+        tensor_a = InfiniteTensor(
+            (1, None, None),
+            ones_func,
+            TensorWindow((1, 64, 64)),
+            tile_store=store,
+            tensor_id=uuid.uuid4(),
+        )
+        tensor_b = InfiniteTensor(
+            (1, None, None),
+            ones_func,
+            TensorWindow((1, 64, 64)),
+            tile_store=store,
+            tensor_id=uuid.uuid4(),
+        )
+
+        store.begin_access(tensor_b.uuid)
+        try:
+            _ = tensor_a[:, 0:128, 0:64]
+            assert len(store._windows) == 2
+        finally:
+            store.end_access(tensor_b.uuid)
+        assert len(store._windows) == 1
+
+    def test_clear_cache_drops_stored_windows(self, tile_store):
+        """clear_cache should force re-computation of windows."""
+        window = TensorWindow((1, 64, 64))
+        call_count = {"n": 0}
+
+        def counting_func(ctx):
+            call_count["n"] += 1
+            return torch.ones((1, 64, 64))
+
+        tensor = InfiniteTensor(
+            (1, None, None),
+            counting_func,
+            window,
+            tile_store=tile_store,
+            tensor_id=uuid.uuid4(),
+        )
+
+        _ = tensor[:, 0:64, 0:64]
+        first_calls = call_count["n"]
+        assert first_calls == 1
+
+        _ = tensor[:, 0:64, 0:64]
+        assert call_count["n"] == first_calls
+
+        tensor.clear_cache()
+        _ = tensor[:, 0:64, 0:64]
+        assert call_count["n"] == first_calls + 1

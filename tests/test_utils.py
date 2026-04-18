@@ -36,7 +36,14 @@ def create_test_tensor(
     
     window = TensorWindow(window_shape, **window_kwargs)
     store = kwargs.pop('tile_store', MemoryTileStore())
-    return store.get_or_create(uuid.uuid4(), shape, func, window, **kwargs)
+    return InfiniteTensor(
+        shape,
+        func,
+        window,
+        tile_store=store,
+        tensor_id=uuid.uuid4(),
+        **kwargs,
+    )
 
 
 def assert_tensor_properties(
@@ -97,15 +104,16 @@ def create_dependency_chain(
     current = base_tensor
     
     for _ in range(chain_length):
-        current = base_tensor._store.get_or_create(
-            uuid.uuid4(),
+        current = InfiniteTensor(
             current.shape,
             transform_func,
             window,
             args=(current,),
-            args_windows=(window,)
+            args_windows=(window,),
+            tile_store=base_tensor._store,
+            tensor_id=uuid.uuid4(),
         )
-    
+
     return current
 
 
