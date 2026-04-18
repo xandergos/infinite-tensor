@@ -29,9 +29,9 @@ Overlapping output windows are **summed** in the region they overlap by default.
 
 ## Key Concepts
 
-1. `**TensorWindow`**: output window specification. Fixed `size`, optional `stride` (defaults to `size`, non-overlapping) and `offset` (defaults to zeros). Your `f` must return a tensor of exactly `size`.
-2. `**InfiniteTensor`**: immutable tensor with a shape (any number of `None` dims), a deterministic `f`, a declared `dtype` and `device`, and a backing `TileStore`. Can depend on other `InfiniteTensor`s through `args` / `args_windows`.
-3. `**TileStore**`: owns cached results. Pick one:
+1. `TensorWindow`: output window specification. Fixed `size`, optional `stride` (defaults to `size`, non-overlapping) and `offset` (defaults to zeros). Your `f` must return a tensor of exactly `size`.
+2. `InfiniteTensor`: immutable tensor with a shape (any number of `None` dims), a deterministic `f`, a declared `dtype` and `device`, and a backing `TileStore`. Can depend on other `InfiniteTensor`s through `args` / `args_windows`.
+3. `TileStore`: owns cached results. Pick one:
   - `MemoryTileStore`: in-memory, one shared cache for every tensor using that store.
   - `HDF5TileStore`: persistent, keeps computed results on disk in an HDF5 file so later reads can reuse them. Requires `h5py` (install via the `hdf5` extra).
 
@@ -324,13 +324,13 @@ See `infinite_tensor/tilestore/persistent.py` for the full contract and `hdf5_ti
 All live at `infinite_tensor` top level:
 
 
-| Exception             | Raised when                                                                                     |
-| --------------------- | ----------------------------------------------------------------------------------------------- |
-| `InfiniteTensorError` | base class for everything below                                                                 |
+| Exception             | Raised when                                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `InfiniteTensorError` | base class for everything below                                                                               |
 | `ValidationError`     | invalid constructor arguments, reconnecting with a different saved configuration, unsupported dtype migration |
-| `ShapeMismatchError`  | `f` returned a tensor whose shape differs from `TensorWindow.size`                              |
-| `DeviceMismatchError` | `f` returned a tensor on a different device than the tensor was declared with                   |
-| `DtypeMismatchError`  | `f` returned a tensor with a different dtype than the tensor was declared with                  |
+| `ShapeMismatchError`  | `f` returned a tensor whose shape differs from `TensorWindow.size`                                            |
+| `DeviceMismatchError` | `f` returned a tensor on a different device than the tensor was declared with                                 |
+| `DtypeMismatchError`  | `f` returned a tensor with a different dtype than the tensor was declared with                                |
 
 
 ## Example
