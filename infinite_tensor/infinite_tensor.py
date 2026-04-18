@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import logging
-from typing import Any, Callable, Iterable, Optional
 import itertools
+import logging
 import uuid
+from collections.abc import Iterable
+from typing import Any, Callable
 
 import torch
 
 from infinite_tensor.tensor_window import TensorWindow
 from infinite_tensor.tilestore import TileStore
 from infinite_tensor.utils import standardize_indices
-
 
 # COORDINATE SYSTEM DEFINITIONS:
 # pixel space - Raw tensor coordinates (what users pass to __getitem__).
@@ -22,34 +22,43 @@ DEFAULT_DEVICE = torch.device("cpu")
 # ERROR MESSAGES
 TILE_DELETED_ERROR_MSG = "Tile has been deleted. This indicates either a bug or an attempt to access a tensor after cleanup."
 SHAPE_MISMATCH_ERROR_MSG = "Value shape {actual} does not match indexed shape {expected}"
-OUTPUT_SHAPE_ERROR_MSG = "Function output shape {actual} does not match expected window shape {expected}"
-DEVICE_MISMATCH_ERROR_MSG = "Function output is on device {actual}, tensor declared device {expected}."
+OUTPUT_SHAPE_ERROR_MSG = (
+    "Function output shape {actual} does not match expected window shape {expected}"
+)
+DEVICE_MISMATCH_ERROR_MSG = (
+    "Function output is on device {actual}, tensor declared device {expected}."
+)
 
 logger = logging.getLogger(__name__)
 
 
 class InfiniteTensorError(Exception):
     """Base exception for infinite tensor operations."""
+
     pass
 
 
 class TileAccessError(InfiniteTensorError):
     """Raised when trying to access a deleted or invalid tile."""
+
     pass
 
 
 class ShapeMismatchError(InfiniteTensorError):
     """Raised when tensor shapes don't match expected dimensions."""
+
     pass
 
 
 class DeviceMismatchError(InfiniteTensorError):
     """Raised when a tensor produced by ``f`` is on a different device than declared."""
+
     pass
 
 
 class ValidationError(InfiniteTensorError):
     """Raised when parameter validation fails."""
+
     pass
 
 
@@ -92,7 +101,7 @@ def _normalize_device(device: torch.device | str) -> torch.device:
     return torch.zeros((), device=resolved).device
 
 
-def _parse_to_args(*args, **kwargs) -> tuple[Optional[torch.device], Optional[torch.dtype]]:
+def _parse_to_args(*args, **kwargs) -> tuple[torch.device | None, torch.dtype | None]:
     """Parse ``torch.Tensor.to``-style arguments into ``(device, dtype)``.
 
     Accepts any of:
@@ -107,7 +116,7 @@ def _parse_to_args(*args, **kwargs) -> tuple[Optional[torch.device], Optional[to
     unrecognized arguments.
     """
     device: Any = kwargs.pop("device", None)
-    dtype: Optional[torch.dtype] = kwargs.pop("dtype", None)
+    dtype: torch.dtype | None = kwargs.pop("dtype", None)
     if kwargs:
         raise TypeError(f"Unexpected keyword arguments to .to(): {list(kwargs)}")
 
@@ -124,9 +133,7 @@ def _parse_to_args(*args, **kwargs) -> tuple[Optional[torch.device], Optional[to
     for arg in args:
         if isinstance(arg, torch.Tensor):
             if device is not None or dtype is not None:
-                raise TypeError(
-                    ".to(tensor) cannot be combined with device/dtype arguments"
-                )
+                raise TypeError(".to(tensor) cannot be combined with device/dtype arguments")
             device = arg.device
             dtype = arg.dtype
         elif isinstance(arg, torch.dtype):
@@ -210,13 +217,13 @@ class InfiniteTensor:
         shape: tuple[int | None, ...],
         f: Callable,
         output_window: TensorWindow,
-        args: tuple = None,
+        args: tuple[Any, ...] | None = None,
         args_windows=None,
         dtype: torch.dtype = DEFAULT_DTYPE,
         device: torch.device | str = DEFAULT_DEVICE,
-        tile_store: Optional[TileStore] = None,
-        tensor_id: Optional[Any] = None,
-        batch_size: Optional[int] = None,
+        tile_store: TileStore | None = None,
+        tensor_id: Any | None = None,
+        batch_size: int | None = None,
     ):
         """Initialize an ``InfiniteTensor``.
 
@@ -250,6 +257,7 @@ class InfiniteTensor:
 
         if tile_store is None:
             from infinite_tensor.tilestore import MemoryTileStore
+
             tile_store = MemoryTileStore()
         self._store = tile_store
         self._uuid = str(tensor_id) if tensor_id is not None else str(uuid.uuid4())
@@ -259,9 +267,7 @@ class InfiniteTensor:
             list(args_windows) if args_windows is not None else [None] * len(normalized_args)
         )
 
-        _validate_tensor_windows(
-            shape, output_window, normalized_args, normalized_args_windows
-        )
+        _validate_tensor_windows(shape, output_window, normalized_args, normalized_args_windows)
 
         for i, arg in enumerate(normalized_args):
             if not isinstance(arg, InfiniteTensor):
@@ -314,14 +320,14 @@ class InfiniteTensor:
         return self._output_window
 
     @property
-    def batch_size(self) -> Optional[int]:
+    def batch_size(self) -> int | None:
         return self._batch_size
 
     def clear_cache(self) -> None:
         """Drop regeneratable cached state for this tensor in the backing store."""
         self._store.clear_cache(self._uuid)
 
-    def to(self, *args, **kwargs) -> "InfiniteTensor":
+    def to(self, *args, **kwargs) -> InfiniteTensor:
         """Move this tensor's device and/or dtype in place, torch-style.
 
         Accepts any of ``.to(device)``, ``.to(dtype)``, ``.to(other_tensor)``,
@@ -335,9 +341,7 @@ class InfiniteTensor:
         Returns ``self`` in all success paths.
         """
         target_device, target_dtype = _parse_to_args(*args, **kwargs)
-        new_device = (
-            _normalize_device(target_device) if target_device is not None else self._device
-        )
+        new_device = _normalize_device(target_device) if target_device is not None else self._device
         new_dtype = target_dtype if target_dtype is not None else self._dtype
         if new_device == self._device and new_dtype == self._dtype:
             return self
@@ -352,21 +356,19 @@ class InfiniteTensor:
 
     def __getitem__(self, indices: tuple[int | slice, ...]) -> torch.Tensor:
         """Return tensor values for the requested pixel-space indices."""
-        indices, collapse_dims = standardize_indices(self.shape, indices)
-        indices = tuple(indices)
-        logger.debug(f"Accessing tensor slice with indices: {indices}")
+        pixel_slices, collapse_dims = standardize_indices(self.shape, indices)
+        pixel_slices_tuple: tuple[slice, ...] = tuple(pixel_slices)
+        logger.debug(f"Accessing tensor slice with indices: {pixel_slices_tuple}")
 
         self._store.begin_access(self._uuid)
         try:
-            self._ensure_processed_range([indices])
-            result = self._store.read_pixels(self._uuid, indices)
+            self._ensure_processed_range([pixel_slices_tuple])
+            result = self._store.read_pixels(self._uuid, pixel_slices_tuple)
         finally:
             self._store.end_access(self._uuid)
 
         if collapse_dims:
-            target_shape = tuple(
-                s for i, s in enumerate(result.shape) if i not in collapse_dims
-            )
+            target_shape = tuple(s for i, s in enumerate(result.shape) if i not in collapse_dims)
             result = result.reshape(target_shape)
         return result
 
@@ -385,13 +387,15 @@ class InfiniteTensor:
         invoked (either per-window or in batches) and the result is passed to
         :meth:`TileStore.notify_window_processed`.
         """
-        valid_window_indices: set[tuple[int, ...]] = set()
+        pending_windows: list[tuple[int, ...]] = []
+        seen: set[tuple[int, ...]] = set()
         for window_index in window_indices:
             if self._store.is_window_processed(self._uuid, window_index):
                 logger.debug(f"Window {window_index} already processed, skipping")
                 continue
-            valid_window_indices.add(window_index)
-        valid_window_indices = list(valid_window_indices)
+            if window_index not in seen:
+                seen.add(window_index)
+                pending_windows.append(window_index)
 
         for arg in self.args:
             arg._store.begin_access(arg._uuid)
@@ -399,12 +403,11 @@ class InfiniteTensor:
             for i, arg_window in enumerate(self.args_windows):
                 upstream = self.args[i]
                 pixel_ranges = [
-                    arg_window.get_bounds(window_index)
-                    for window_index in valid_window_indices
+                    arg_window.get_bounds(window_index) for window_index in pending_windows
                 ]
                 upstream._ensure_processed_range(pixel_ranges)
 
-            self._process_windows(valid_window_indices)
+            self._process_windows(pending_windows)
         finally:
             for arg in self.args:
                 arg._store.end_access(arg._uuid)
@@ -413,7 +416,7 @@ class InfiniteTensor:
         """Invoke ``f`` for each pending window and forward outputs to the store."""
         if self.batch_size is None:
             for window_index in valid_window_indices:
-                arg_tensors = []
+                arg_tensors: list[torch.Tensor] = []
                 for i, arg_window in enumerate(self.args_windows):
                     upstream = self.args[i]
                     arg_tensors.append(upstream[arg_window.get_bounds(window_index)])
@@ -423,9 +426,7 @@ class InfiniteTensor:
                 expected_shape = self.output_window.size
                 if tuple(output.shape) != tuple(expected_shape):
                     raise ShapeMismatchError(
-                        OUTPUT_SHAPE_ERROR_MSG.format(
-                            actual=output.shape, expected=expected_shape
-                        )
+                        OUTPUT_SHAPE_ERROR_MSG.format(actual=output.shape, expected=expected_shape)
                     )
                 if output.device != self._device:
                     raise DeviceMismatchError(
@@ -436,14 +437,13 @@ class InfiniteTensor:
                 self._store.notify_window_processed(self._uuid, window_index, output)
                 logger.debug(f"Processed window {window_index}")
         else:
+
             def apply_batch(batch_window_indices: list[tuple[int, ...]]) -> None:
-                arg_tensors = [[] for _ in range(len(self.args))]
+                arg_tensors: list[list[torch.Tensor]] = [[] for _ in range(len(self.args))]
                 for window_index in batch_window_indices:
                     for i, arg_window in enumerate(self.args_windows):
                         upstream = self.args[i]
-                        arg_tensors[i].append(
-                            upstream[arg_window.get_bounds(window_index)]
-                        )
+                        arg_tensors[i].append(upstream[arg_window.get_bounds(window_index)])
 
                 with torch.no_grad():
                     outputs = self.f(batch_window_indices, *arg_tensors)
@@ -482,14 +482,15 @@ class InfiniteTensor:
 
     def to_json(self) -> dict:
         """Serialize this tensor's identifying metadata to JSON-safe primitives."""
-        def window_to_dict(w: Optional[TensorWindow]):
+
+        def window_to_dict(w: TensorWindow | None):
             return None if w is None else w.to_dict()
 
         return {
-            'shape': list(self.shape),
-            'dtype': _dtype_to_str(self.dtype),
-            'device': _device_to_str(self.device),
-            'args': [a.uuid for a in self.args],
-            'args_windows': [window_to_dict(w) for w in self.args_windows],
-            'output_window': self.output_window.to_dict(),
+            "shape": list(self.shape),
+            "dtype": _dtype_to_str(self.dtype),
+            "device": _device_to_str(self.device),
+            "args": [a.uuid for a in self.args],
+            "args_windows": [window_to_dict(w) for w in self.args_windows],
+            "output_window": self.output_window.to_dict(),
         }

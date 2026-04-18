@@ -17,6 +17,7 @@ from infinite_tensor.tilestore import MemoryTileStore
 
 try:
     import h5py  # noqa: F401
+
     HAS_H5PY = True
 except ImportError:
     HAS_H5PY = False
@@ -34,6 +35,7 @@ def _ones_64():
 
 def _build_tensor_via_get_or_create(store, tensor_id, **extra_kwargs):
     """Invoke the deprecated ``get_or_create`` shim and capture its warnings."""
+
     def f(ctx):
         return _ones_64()
 
@@ -80,20 +82,14 @@ class TestMemoryGetOrCreate:
 
     def test_tile_size_is_ignored_on_memory_store(self):
         store = MemoryTileStore()
-        _, _ = _build_tensor_via_get_or_create(
-            store, str(uuid.uuid4()), tile_size=128
-        )
+        _, _ = _build_tensor_via_get_or_create(store, str(uuid.uuid4()), tile_size=128)
         assert not hasattr(store, "tile_size")
 
     def test_idempotent_reregistration_against_shared_tensor_id(self):
         store = MemoryTileStore()
         tensor_id = str(uuid.uuid4())
-        first, _ = _build_tensor_via_get_or_create(
-            store, tensor_id, cache_method="indirect"
-        )
-        second, _ = _build_tensor_via_get_or_create(
-            store, tensor_id, cache_method="indirect"
-        )
+        first, _ = _build_tensor_via_get_or_create(store, tensor_id, cache_method="indirect")
+        second, _ = _build_tensor_via_get_or_create(store, tensor_id, cache_method="indirect")
         _ = first[0:128, 0:128]
         assert torch.allclose(second[0:128, 0:128], torch.ones(128, 128))
 
@@ -140,9 +136,7 @@ class TestHDF5BackCompat:
     def test_legacy_tile_size_maps_to_store_tile_size(self, tmp_path):
         filepath = tmp_path / "legacy_tile_size.h5"
         store = HDF5TileStore(str(filepath), mode="w", tile_size=64)
-        _, _ = _build_tensor_via_get_or_create(
-            store, "tile_size_override", tile_size=128
-        )
+        _, _ = _build_tensor_via_get_or_create(store, "tile_size_override", tile_size=128)
         assert store.tile_size == 128
         store.close()
 

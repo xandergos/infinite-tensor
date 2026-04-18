@@ -26,12 +26,11 @@ import abc
 import itertools
 import warnings
 from collections import OrderedDict
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 
 from infinite_tensor.tilestore import TileStore, _tensor_bytes
-
 
 DEFAULT_TILE_SIZE = 512
 DEFAULT_CACHE_SIZE_BYTES = 100 * 1024 * 1024
@@ -56,8 +55,8 @@ class PersistentTileStore(TileStore):
     def __init__(
         self,
         tile_size: int | tuple[int, ...] = DEFAULT_TILE_SIZE,
-        cache_size_bytes: Optional[int] = DEFAULT_CACHE_SIZE_BYTES,
-        cache_size_tiles: Optional[int] = None,
+        cache_size_bytes: int | None = DEFAULT_CACHE_SIZE_BYTES,
+        cache_size_tiles: int | None = None,
         **kwargs,
     ):
         if "tile_cache_size" in kwargs:
@@ -74,25 +73,21 @@ class PersistentTileStore(TileStore):
         self.tile_size = tile_size
         self._cache_size_bytes = cache_size_bytes
         self._cache_size_tiles = cache_size_tiles
-        self._tile_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+        self._tile_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
         self._tile_bytes: int = 0
-        self._tensor_store: Dict[str, Any] = {}
-        self._processed_windows_cache: Dict[str, set] = {}
-        self._tile_size_cache: Dict[str, tuple[int, ...]] = {}
-        self._tensor_access_depth: Dict[str, int] = {}
+        self._tensor_store: dict[str, Any] = {}
+        self._processed_windows_cache: dict[str, set] = {}
+        self._tile_size_cache: dict[str, tuple[int, ...]] = {}
+        self._tensor_access_depth: dict[str, int] = {}
         self._dirty_tiles: set[tuple[str, tuple[int, ...]]] = set()
-        self._tile_contributions: Dict[
-            tuple[str, tuple[int, ...]], set[tuple[int, ...]]
-        ] = {}
-        self._pending_durable_windows: Dict[str, set[tuple[int, ...]]] = {}
-        self._window_pending_tiles: Dict[
-            tuple[str, tuple[int, ...]], set[tuple[int, ...]]
-        ] = {}
+        self._tile_contributions: dict[tuple[str, tuple[int, ...]], set[tuple[int, ...]]] = {}
+        self._pending_durable_windows: dict[str, set[tuple[int, ...]]] = {}
+        self._window_pending_tiles: dict[tuple[str, tuple[int, ...]], set[tuple[int, ...]]] = {}
 
     # ---- Abstract storage primitives ----
 
     @abc.abstractmethod
-    def _read_tensor_metadata(self, tensor_id: str) -> Optional[dict]:
+    def _read_tensor_metadata(self, tensor_id: str) -> dict | None:
         """Return ``{"metadata": dict, "tile_size": tuple[int, ...]}`` or ``None``.
 
         Returns ``None`` when the backend has no record of ``tensor_id``.
@@ -120,16 +115,14 @@ class PersistentTileStore(TileStore):
         ...
 
     @abc.abstractmethod
-    def _append_processed_window(
-        self, tensor_id: str, window_index: tuple[int, ...]
-    ) -> None:
+    def _append_processed_window(self, tensor_id: str, window_index: tuple[int, ...]) -> None:
         """Append ``window_index`` to the persistent processed-window record."""
         ...
 
     @abc.abstractmethod
     def _read_tile(
         self, tensor_id: str, tile_index: tuple[int, ...]
-    ) -> Optional[tuple[torch.Tensor, set[tuple[int, ...]]]]:
+    ) -> tuple[torch.Tensor, set[tuple[int, ...]]] | None:
         """Return ``(tile_tensor, contributions)`` or ``None`` if absent.
 
         ``contributions`` is the set of window indices whose outputs are
@@ -214,9 +207,7 @@ class PersistentTileStore(TileStore):
         cache to temporarily overrun the configured limits for tiles loaded
         during the ongoing access.
         """
-        self._tensor_access_depth[tensor_id] = (
-            self._tensor_access_depth.get(tensor_id, 0) + 1
-        )
+        self._tensor_access_depth[tensor_id] = self._tensor_access_depth.get(tensor_id, 0) + 1
 
     def end_access(self, tensor_id: str) -> None:
         """Release the tile-cache hold for ``tensor_id`` and trim the cache."""
@@ -230,9 +221,7 @@ class PersistentTileStore(TileStore):
 
     # ---- Tile-math helpers ----
 
-    def _effective_tile_size(
-        self, tensor_shape: tuple[int | None, ...]
-    ) -> tuple[int, ...]:
+    def _effective_tile_size(self, tensor_shape: tuple[int | None, ...]) -> tuple[int, ...]:
         """Expand ``self.tile_size`` into a per-infinite-dim tuple for ``tensor_shape``."""
         from infinite_tensor.infinite_tensor import ValidationError
 
@@ -295,7 +284,9 @@ class PersistentTileStore(TileStore):
         for slice_index, pixel_slice in enumerate(slices):
             if tensor_shape[slice_index] is None:
                 tile_start = tile_index[infinite_dim_index] * tile_size_tuple[infinite_dim_index]
-                tile_end = (tile_index[infinite_dim_index] + 1) * tile_size_tuple[infinite_dim_index]
+                tile_end = (tile_index[infinite_dim_index] + 1) * tile_size_tuple[
+                    infinite_dim_index
+                ]
                 start = max(pixel_slice.start, tile_start)
                 if pixel_slice.step > 1:
                     offset = (start - pixel_slice.start) % pixel_slice.step
@@ -339,9 +330,7 @@ class PersistentTileStore(TileStore):
 
     # ---- Tile LRU cache ----
 
-    def _cache_tile(
-        self, tensor_id: str, tile_index: tuple[int, ...], tile: torch.Tensor
-    ) -> None:
+    def _cache_tile(self, tensor_id: str, tile_index: tuple[int, ...], tile: torch.Tensor) -> None:
         """Insert or refresh a tile in the LRU cache."""
         key = (tensor_id, tile_index)
         if key in self._tile_cache:
@@ -357,15 +346,9 @@ class PersistentTileStore(TileStore):
 
     def _cache_over_limit(self) -> bool:
         """Return whether the tile cache currently exceeds either configured limit."""
-        if (
-            self._cache_size_bytes is not None
-            and self._tile_bytes > self._cache_size_bytes
-        ):
+        if self._cache_size_bytes is not None and self._tile_bytes > self._cache_size_bytes:
             return True
-        if (
-            self._cache_size_tiles is not None
-            and len(self._tile_cache) > self._cache_size_tiles
-        ):
+        if self._cache_size_tiles is not None and len(self._tile_cache) > self._cache_size_tiles:
             return True
         return False
 
@@ -392,9 +375,7 @@ class PersistentTileStore(TileStore):
             self._tile_bytes -= _tensor_bytes(self._tile_cache[key])
             del self._tile_cache[key]
 
-    def _get_cached_tile(
-        self, tensor_id: str, tile_index: tuple[int, ...]
-    ) -> Optional[torch.Tensor]:
+    def _get_cached_tile(self, tensor_id: str, tile_index: tuple[int, ...]) -> torch.Tensor | None:
         """Return a cached tile and mark it most-recently-used, or ``None``."""
         key = (tensor_id, tile_index)
         if key in self._tile_cache:
@@ -411,9 +392,7 @@ class PersistentTileStore(TileStore):
             return tile
         return tile.to(tensor.device)
 
-    def _load_tile(
-        self, tensor_id: str, tile_index: tuple[int, ...]
-    ) -> Optional[torch.Tensor]:
+    def _load_tile(self, tensor_id: str, tile_index: tuple[int, ...]) -> torch.Tensor | None:
         """Return the tile (cache first, then backend), or ``None`` if absent.
 
         On a cache miss that hits the backend, the tile's contribution set is
@@ -432,9 +411,7 @@ class PersistentTileStore(TileStore):
         self._tile_contributions[(tensor_id, tile_index)] = set(contributions)
         return tile
 
-    def _write_dirty_tile(
-        self, tensor_id: str, tile_index: tuple[int, ...]
-    ) -> None:
+    def _write_dirty_tile(self, tensor_id: str, tile_index: tuple[int, ...]) -> None:
         """Write a dirty tile to the backend and cascade any now-durable windows.
 
         After the tile is persisted, every window in its contribution set that
@@ -538,9 +515,7 @@ class PersistentTileStore(TileStore):
         self._delete_tensor_state(tensor_id)
         self._flush_backend()
 
-    def is_window_processed(
-        self, tensor_id: str, window_index: tuple[int, ...]
-    ) -> bool:
+    def is_window_processed(self, tensor_id: str, window_index: tuple[int, ...]) -> bool:
         return window_index in self._load_processed_windows(tensor_id)
 
     def notify_window_processed(
@@ -564,8 +539,7 @@ class PersistentTileStore(TileStore):
         tile_size_tuple = self._tile_size_cache[tensor_id]
         raw_bounds = tensor.output_window.get_bounds(window_index)
         pixel_bounds = tuple(
-            slice(b.start, b.stop, b.step if b.step is not None else 1)
-            for b in raw_bounds
+            slice(b.start, b.stop, b.step if b.step is not None else 1) for b in raw_bounds
         )
 
         tile_range_slices = self._pixel_slices_to_tile_ranges(
@@ -585,9 +559,7 @@ class PersistentTileStore(TileStore):
             cache_key = (tensor_id, tile_index)
             tile = self._load_tile(tensor_id, tile_index)
             if tile is None:
-                tile = torch.zeros(
-                    tile_shape, dtype=tensor.dtype, device=tensor.device
-                )
+                tile = torch.zeros(tile_shape, dtype=tensor.dtype, device=tensor.device)
                 self._cache_tile(tensor_id, tile_index, tile)
                 self._tile_contributions[cache_key] = set()
 
@@ -617,12 +589,8 @@ class PersistentTileStore(TileStore):
         processed.add(window_index)
 
         if pending_tiles_for_window:
-            self._pending_durable_windows.setdefault(tensor_id, set()).add(
-                window_index
-            )
-            self._window_pending_tiles[(tensor_id, window_index)] = (
-                pending_tiles_for_window
-            )
+            self._pending_durable_windows.setdefault(tensor_id, set()).add(window_index)
+            self._window_pending_tiles[(tensor_id, window_index)] = pending_tiles_for_window
         else:
             self._append_processed_window(tensor_id, window_index)
 
@@ -632,18 +600,14 @@ class PersistentTileStore(TileStore):
         pixel_slices: tuple[slice, ...],
     ) -> torch.Tensor:
         """Assemble the pixel region by assigning from accumulated tiles."""
-        from infinite_tensor.infinite_tensor import TileAccessError, TILE_DELETED_ERROR_MSG
+        from infinite_tensor.infinite_tensor import TILE_DELETED_ERROR_MSG, TileAccessError
 
         tensor = self._tensor_store[tensor_id]
         tensor_shape = tensor.shape
         tile_size_tuple = self._tile_size_cache[tensor_id]
 
-        output_shape = tuple(
-            max((s.stop - s.start - 1) // s.step + 1, 0) for s in pixel_slices
-        )
-        output_tensor = torch.empty(
-            output_shape, dtype=tensor.dtype, device=tensor.device
-        )
+        output_shape = tuple(max((s.stop - s.start - 1) // s.step + 1, 0) for s in pixel_slices)
+        output_tensor = torch.empty(output_shape, dtype=tensor.dtype, device=tensor.device)
 
         tile_range_slices = self._pixel_slices_to_tile_ranges(
             tensor_shape, tile_size_tuple, pixel_slices
@@ -703,9 +667,7 @@ class PersistentTileStore(TileStore):
                 migrated = cached_tile.to(tensor.device)
                 self._tile_cache[key] = migrated
                 self._tile_bytes += _tensor_bytes(migrated)
-        self._write_tensor_metadata(
-            tensor_id, tensor.to_json(), self._tile_size_cache[tensor_id]
-        )
+        self._write_tensor_metadata(tensor_id, tensor.to_json(), self._tile_size_cache[tensor_id])
         self._flush_backend()
 
     def __enter__(self):

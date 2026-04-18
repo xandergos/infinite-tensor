@@ -15,7 +15,7 @@ The only interface between an InfiniteTensor and its store is:
 import abc
 import warnings
 from collections import OrderedDict
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -38,7 +38,7 @@ class TileStore(abc.ABC):
         """Remove all state (registration, windows, cached data) for a tensor."""
         ...
 
-    def clear_cache(self, tensor_id: str) -> None:
+    def clear_cache(self, tensor_id: str) -> None:  # noqa: B027
         """Drop any regeneratable cached state for a tensor.
 
         Default implementation is a no-op. Subclasses with regeneratable caches
@@ -48,7 +48,7 @@ class TileStore(abc.ABC):
         """
         pass
 
-    def begin_access(self, tensor_id: str) -> None:
+    def begin_access(self, tensor_id: str) -> None:  # noqa: B027
         """Mark the start of an outer user access (from ``InfiniteTensor.__getitem__``).
 
         Default implementation is a no-op. Stores that evict based on a size
@@ -58,7 +58,7 @@ class TileStore(abc.ABC):
         """
         pass
 
-    def end_access(self, tensor_id: str) -> None:
+    def end_access(self, tensor_id: str) -> None:  # noqa: B027
         """Mark the end of an outer user access. Default implementation is a no-op."""
         pass
 
@@ -215,8 +215,8 @@ class MemoryTileStore(TileStore):
         cache_size_windows: Optional[int] = None,
     ):
         super().__init__()
-        self._tensor_store: Dict[str, Any] = {}
-        self._windows: "OrderedDict[tuple[str, tuple[int, ...]], torch.Tensor]" = OrderedDict()
+        self._tensor_store: dict[str, Any] = {}
+        self._windows: OrderedDict[tuple[str, tuple[int, ...]], torch.Tensor] = OrderedDict()
         self._bytes: int = 0
         self._cache_size_bytes = cache_size_bytes
         self._cache_size_windows = cache_size_windows
@@ -310,12 +310,8 @@ class MemoryTileStore(TileStore):
         tensor = self._tensor_store[tensor_id]
         output_window = tensor.output_window
 
-        output_shape = tuple(
-            max((s.stop - s.start - 1) // s.step + 1, 0) for s in pixel_slices
-        )
-        output_tensor = torch.zeros(
-            output_shape, dtype=tensor.dtype, device=tensor.device
-        )
+        output_shape = tuple(max((s.stop - s.start - 1) // s.step + 1, 0) for s in pixel_slices)
+        output_tensor = torch.zeros(output_shape, dtype=tensor.dtype, device=tensor.device)
 
         for window_index in output_window.intersecting_windows(
             pixel_slices, tensor_shape=tensor.shape

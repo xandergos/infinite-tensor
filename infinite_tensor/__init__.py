@@ -1,18 +1,20 @@
+from importlib.metadata import PackageNotFoundError, version
+
 from .infinite_tensor import (
+    DeviceMismatchError,
     InfiniteTensor,
     InfiniteTensorError,
-    TileAccessError,
     ShapeMismatchError,
-    DeviceMismatchError,
+    TileAccessError,
     ValidationError,
 )
 from .tensor_window import TensorWindow
 from .tilestore import MemoryTileStore
-from importlib.metadata import PackageNotFoundError, version
 
 # Optional HDF5 support
 try:
-    from .tilestore.hdf5_tilestore import HDF5TileStore, HAS_H5PY
+    from .tilestore.hdf5_tilestore import HAS_H5PY, HDF5TileStore  # noqa: F401
+
     _HAS_HDF5 = HAS_H5PY
 except ImportError:
     _HAS_HDF5 = False
@@ -23,15 +25,15 @@ except PackageNotFoundError:
     __version__ = "0.0.0"
 
 __all__ = [
-    'InfiniteTensor',
-    'InfiniteTensorError',
-    'TileAccessError',
-    'ShapeMismatchError',
-    'DeviceMismatchError',
-    'ValidationError',
-    'TensorWindow',
-    'MemoryTileStore',
+    "InfiniteTensor",
+    "InfiniteTensorError",
+    "TileAccessError",
+    "ShapeMismatchError",
+    "DeviceMismatchError",
+    "ValidationError",
+    "TensorWindow",
+    "MemoryTileStore",
 ]
 
 if _HAS_HDF5:
-    __all__.append('HDF5TileStore')
+    __all__.append("HDF5TileStore")

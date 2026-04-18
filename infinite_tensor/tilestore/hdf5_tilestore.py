@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -35,6 +34,7 @@ from infinite_tensor.tilestore.persistent import (
 
 try:
     import h5py
+
     HAS_H5PY = True
 except ImportError:
     HAS_H5PY = False
@@ -74,8 +74,8 @@ class HDF5TileStore(PersistentTileStore):
         compression: str | None = "gzip",
         compression_opts: int | None = 4,
         tile_size: int | tuple[int, ...] = DEFAULT_TILE_SIZE,
-        cache_size_bytes: Optional[int] = DEFAULT_CACHE_SIZE_BYTES,
-        cache_size_tiles: Optional[int] = None,
+        cache_size_bytes: int | None = DEFAULT_CACHE_SIZE_BYTES,
+        cache_size_tiles: int | None = None,
         **kwargs,
     ):
         if not HAS_H5PY:
@@ -102,7 +102,7 @@ class HDF5TileStore(PersistentTileStore):
         else:
             self.mode = "a"
 
-        self._file: Optional["h5py.File"] = None
+        self._file: h5py.File | None = None
 
         if self.mode != "r":
             self._ensure_file_exists()
@@ -173,7 +173,7 @@ class HDF5TileStore(PersistentTileStore):
 
     # ---- Storage primitives ----
 
-    def _read_tensor_metadata(self, tensor_id: str) -> Optional[dict]:
+    def _read_tensor_metadata(self, tensor_id: str) -> dict | None:
         from infinite_tensor.infinite_tensor import ValidationError
 
         tensor_group = self._get_tensor_group(tensor_id)
@@ -218,9 +218,7 @@ class HDF5TileStore(PersistentTileStore):
         raw_entries = [w.decode() if isinstance(w, bytes) else w for w in dataset[:]]
         return {self._decode_index(w) for w in raw_entries}
 
-    def _append_processed_window(
-        self, tensor_id: str, window_index: tuple[int, ...]
-    ) -> None:
+    def _append_processed_window(self, tensor_id: str, window_index: tuple[int, ...]) -> None:
         tensor_group = self._get_tensor_group(tensor_id, create=True)
         if "processed_windows" not in tensor_group:
             vlen_str_dtype = h5py.special_dtype(vlen=str)
@@ -234,7 +232,7 @@ class HDF5TileStore(PersistentTileStore):
 
     def _read_tile(
         self, tensor_id: str, tile_index: tuple[int, ...]
-    ) -> Optional[tuple[torch.Tensor, set[tuple[int, ...]]]]:
+    ) -> tuple[torch.Tensor, set[tuple[int, ...]]] | None:
         tensor_group = self._get_tensor_group(tensor_id)
         if tensor_group is None:
             return None
@@ -270,11 +268,6 @@ class HDF5TileStore(PersistentTileStore):
             compression=self.compression,
             compression_opts=self.compression_opts,
         )
-        encoded_contributions = [
-            self._encode_index(window_index) for window_index in contributions
-        ]
+        encoded_contributions = [self._encode_index(window_index) for window_index in contributions]
         vlen_str_dtype = h5py.special_dtype(vlen=str)
-        dataset.attrs.create(
-            "contributions", encoded_contributions, dtype=vlen_str_dtype
-        )
-
+        dataset.attrs.create("contributions", encoded_contributions, dtype=vlen_str_dtype)

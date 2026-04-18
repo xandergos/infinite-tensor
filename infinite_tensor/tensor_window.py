@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import itertools
-from typing import Iterator
+from collections.abc import Iterator
 
 
 class TensorWindow:
@@ -27,9 +27,9 @@ class TensorWindow:
     def __init__(
         self,
         size: tuple[int, ...],
-        stride: tuple[int, ...] = None,
-        offset: tuple[int, ...] = None,
-        dimension_map: tuple[int | None, ...] = None,
+        stride: tuple[int, ...] | None = None,
+        offset: tuple[int, ...] | None = None,
+        dimension_map: tuple[int | None, ...] | None = None,
     ):
         """Build a window spec.
 
@@ -71,20 +71,26 @@ class TensorWindow:
     def to_dict(self) -> dict:
         """Serialize to JSON-safe primitives."""
         return {
-            'size': list(self.size),
-            'stride': list(self.stride),
-            'offset': list(self.offset),
-            'dimension_map': list(self.dimension_map) if self.dimension_map is not None else None,
+            "size": list(self.size),
+            "stride": list(self.stride),
+            "offset": list(self.offset),
+            "dimension_map": list(self.dimension_map) if self.dimension_map is not None else None,
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "TensorWindow":
+    def from_dict(cls, data: dict) -> TensorWindow:
         """Inverse of :meth:`to_dict`."""
         return cls(
-            size=tuple(int(x) for x in data['size']),
-            stride=tuple(int(x) for x in data['stride']) if data.get('stride') is not None else None,
-            offset=tuple(int(x) for x in data['offset']) if data.get('offset') is not None else None,
-            dimension_map=tuple(None if x is None else int(x) for x in data['dimension_map']) if data.get('dimension_map') is not None else None,
+            size=tuple(int(x) for x in data["size"]),
+            stride=tuple(int(x) for x in data["stride"])
+            if data.get("stride") is not None
+            else None,
+            offset=tuple(int(x) for x in data["offset"])
+            if data.get("offset") is not None
+            else None,
+            dimension_map=tuple(None if x is None else int(x) for x in data["dimension_map"])
+            if data.get("dimension_map") is not None
+            else None,
         )
 
     def intersecting_windows(

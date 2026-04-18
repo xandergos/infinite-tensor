@@ -39,40 +39,50 @@ def strided_tensor_window():
 @pytest.fixture
 def base_tensor_func():
     """Basic tensor generation function."""
+
     def _base_f(ctx):
         return torch.rand((10, 512, 512))
+
     return _base_f
 
 
 @pytest.fixture
 def zeros_tensor_func():
     """Zero tensor generation function."""
+
     def _zeros_f(ctx):
         return torch.zeros((10, 512, 512))
+
     return _zeros_f
 
 
 @pytest.fixture
 def ones_tensor_func():
     """Ones tensor generation function."""
+
     def _ones_f(ctx):
         return torch.ones((10, 512, 512))
+
     return _ones_f
 
 
 @pytest.fixture
 def dependency_func():
     """Function for creating dependent tensors."""
+
     def _dep_f(ctx, base):
         return base * 2 - 1
+
     return _dep_f
 
 
 @pytest.fixture
 def increment_func():
     """Function for incrementing tensors."""
+
     def _inc_f(ctx, base):
         return base + 1
+
     return _inc_f
 
 

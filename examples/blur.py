@@ -1,6 +1,6 @@
+import matplotlib.pyplot as plt
 import torch
 import torchvision.transforms.v2.functional as F
-import matplotlib.pyplot as plt
 
 from infinite_tensor import InfiniteTensor, TensorWindow
 

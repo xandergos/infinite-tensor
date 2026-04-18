@@ -37,10 +37,14 @@ class TestInfiniteTensorBasics:
 class TestInfiniteTensorDependencies:
     """Test InfiniteTensor dependency functionality."""
 
-    def test_simple_dependency(self, random_infinite_tensor, dependency_func, basic_tensor_window, tile_store):
+    def test_simple_dependency(
+        self, random_infinite_tensor, dependency_func, basic_tensor_window, tile_store
+    ):
         """Test basic tensor dependency operations."""
+
         def dep_func(ctx, base=random_infinite_tensor, w=basic_tensor_window):
             return base[w.get_bounds(ctx)] * 2 - 1
+
         dep = InfiniteTensor(
             (10, None, None),
             dep_func,
@@ -54,13 +58,17 @@ class TestInfiniteTensorDependencies:
         assert result.min() < -0.99
         assert abs(result.mean()) < 0.01
 
-    def test_multiple_dependencies(self, zeros_infinite_tensor, increment_func, basic_tensor_window, tile_store):
+    def test_multiple_dependencies(
+        self, zeros_infinite_tensor, increment_func, basic_tensor_window, tile_store
+    ):
         """Test chaining multiple dependencies."""
         dep = zeros_infinite_tensor
 
-        for i in range(10):
+        for _i in range(10):
+
             def inc_func(ctx, prev=dep, w=basic_tensor_window):
                 return prev[w.get_bounds(ctx)] + 1
+
             dep = InfiniteTensor(
                 (10, None, None),
                 inc_func,
@@ -73,10 +81,14 @@ class TestInfiniteTensorDependencies:
         expected = torch.full_like(result, 10.0)
         assert torch.allclose(result, expected)
 
-    def test_complex_dependency_with_stride(self, zeros_infinite_tensor, increment_func, strided_tensor_window, tile_store):
+    def test_complex_dependency_with_stride(
+        self, zeros_infinite_tensor, increment_func, strided_tensor_window, tile_store
+    ):
         """Test dependency with custom window stride."""
+
         def inc_stride(ctx, base=zeros_infinite_tensor, w=strided_tensor_window):
             return base[w.get_bounds(ctx)] + 1
+
         dep = InfiniteTensor(
             (10, None, None),
             inc_stride,
@@ -93,18 +105,21 @@ class TestInfiniteTensorDependencies:
 class TestInfiniteTensorParametrized:
     """Parametrized tests for various tensor configurations."""
 
-    @pytest.mark.parametrize("slice_config", [
-        (slice(0, 1), slice(0, 256), slice(0, 256)),
-        (slice(None), slice(100, 612), slice(100, 612)),
-        (slice(2, 8), slice(-256, 256), slice(-256, 256)),
-    ])
+    @pytest.mark.parametrize(
+        "slice_config",
+        [
+            (slice(0, 1), slice(0, 256), slice(0, 256)),
+            (slice(None), slice(100, 612), slice(100, 612)),
+            (slice(2, 8), slice(-256, 256), slice(-256, 256)),
+        ],
+    )
     def test_various_slices(self, basic_infinite_tensor, slice_config):
         """Test various slicing configurations."""
         dim0_slice, dim1_slice, dim2_slice = slice_config
         result = basic_infinite_tensor[dim0_slice, dim1_slice, dim2_slice]
 
         expected_shape = []
-        for i, (slice_obj, orig_dim) in enumerate(zip(slice_config, basic_infinite_tensor.shape)):
+        for i, (slice_obj, _orig_dim) in enumerate(zip(slice_config, basic_infinite_tensor.shape)):
             if i == 0:
                 start = slice_obj.start or 0
                 stop = slice_obj.stop or 10
@@ -116,13 +131,17 @@ class TestInfiniteTensorParametrized:
 
         assert tuple(result.shape) == tuple(expected_shape)
 
-    @pytest.mark.parametrize("tensor_shape,window_shape", [
-        ((5, None, None), (5, 256, 256)),
-        ((20, None, None), (20, 1024, 1024)),
-        ((1, None, None), (1, 128, 128)),
-    ])
+    @pytest.mark.parametrize(
+        "tensor_shape,window_shape",
+        [
+            ((5, None, None), (5, 256, 256)),
+            ((20, None, None), (20, 1024, 1024)),
+            ((1, None, None), (1, 128, 128)),
+        ],
+    )
     def test_different_tensor_configurations(self, tensor_shape, window_shape, tile_store):
         """Test different tensor and window shape configurations."""
+
         def dynamic_tensor_func(ctx):
             return torch.ones(window_shape)
 
@@ -135,8 +154,8 @@ class TestInfiniteTensorParametrized:
             tensor_id=uuid.uuid4(),
         )
 
-        result = tensor[0, 0:window_shape[1]//2, 0:window_shape[2]//2]
-        expected_shape = (window_shape[1]//2, window_shape[2]//2)
+        result = tensor[0, 0 : window_shape[1] // 2, 0 : window_shape[2] // 2]
+        expected_shape = (window_shape[1] // 2, window_shape[2] // 2)
         assert tuple(result.shape) == expected_shape
 
 

@@ -14,12 +14,12 @@ from infinite_tensor import (
 )
 from infinite_tensor.tilestore import MemoryTileStore
 
-
 CUDA_AVAILABLE = torch.cuda.is_available()
 requires_cuda = pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
 
 try:
     import h5py  # noqa: F401
+
     HAS_H5PY = True
 except ImportError:
     HAS_H5PY = False
@@ -345,9 +345,7 @@ class TestToHDF5:
             assert store._tile_cache[key].device.type == "cuda"
 
         with h5py.File(filepath, "r") as file_handle:
-            stored = json.loads(
-                file_handle["tensors/t1/metadata"].attrs["meta"]
-            )
+            stored = json.loads(file_handle["tensors/t1/metadata"].attrs["meta"])
         assert stored["device"] == "cuda:0"
 
         store.close()
@@ -360,8 +358,6 @@ class TestToHDF5:
         returned = tensor.to("cpu")
         assert returned is tensor
         with h5py.File(filepath, "r") as file_handle:
-            stored = json.loads(
-                file_handle["tensors/t1/metadata"].attrs["meta"]
-            )
+            stored = json.loads(file_handle["tensors/t1/metadata"].attrs["meta"])
         assert stored["device"] == "cpu"
         store.close()
