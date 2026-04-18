@@ -56,3 +56,9 @@ testpaths = ["tests"]
 [tool.coverage.run]
 source = ["infinite_tensor"]
 branch = true
+
+[tool.coverage.paths]
+source = [
+  "infinite_tensor",
+  "*/site-packages/infinite_tensor",
+]
