@@ -335,7 +335,7 @@ All live at `infinite_tensor` top level:
 
 ## Example
 
-See `[examples/blur.py](examples/blur.py)` for a full worked example: a random-image base tensor blurred twice via two chained `InfiniteTensor`s with a padded arg window.
+See [examples/blur.py](examples/blur.py) for a full worked example: a random-image base tensor blurred twice via two chained `InfiniteTensor`s with a padded arg window.
 
 ## License
 
