@@ -28,6 +28,7 @@ OUTPUT_SHAPE_ERROR_MSG = (
 DEVICE_MISMATCH_ERROR_MSG = (
     "Function output is on device {actual}, tensor declared device {expected}."
 )
+DTYPE_MISMATCH_ERROR_MSG = "Function output has dtype {actual}, tensor declared dtype {expected}."
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,12 @@ class ShapeMismatchError(InfiniteTensorError):
 
 class DeviceMismatchError(InfiniteTensorError):
     """Raised when a tensor produced by ``f`` is on a different device than declared."""
+
+    pass
+
+
+class DtypeMismatchError(InfiniteTensorError):
+    """Raised when a tensor produced by ``f`` has a different dtype than declared."""
 
     pass
 
@@ -434,6 +441,10 @@ class InfiniteTensor:
                             actual=output.device, expected=self._device
                         )
                     )
+                if output.dtype != self._dtype:
+                    raise DtypeMismatchError(
+                        DTYPE_MISMATCH_ERROR_MSG.format(actual=output.dtype, expected=self._dtype)
+                    )
                 self._store.notify_window_processed(self._uuid, window_index, output)
                 logger.debug(f"Processed window {window_index}")
         else:
@@ -460,6 +471,12 @@ class InfiniteTensor:
                         raise DeviceMismatchError(
                             DEVICE_MISMATCH_ERROR_MSG.format(
                                 actual=output.device, expected=self._device
+                            )
+                        )
+                    if output.dtype != self._dtype:
+                        raise DtypeMismatchError(
+                            DTYPE_MISMATCH_ERROR_MSG.format(
+                                actual=output.dtype, expected=self._dtype
                             )
                         )
                     self._store.notify_window_processed(self._uuid, window_index, output)
