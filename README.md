@@ -22,20 +22,18 @@ When you slice it:
 
 1. The library enumerates every output window that intersects the requested region.
 2. `f` is called on each window (and on any upstream dependencies that feed it).
-3. Results are handed to a `TileStore`, which caches them so repeat reads are free.
-4. The store assembles the requested pixels and returns a `torch.Tensor`.
+3. Results are handed to a TileStore, which caches them so repeat reads are free.
+4. The store assembles the requested pixels and returns a torch Tensor.
 
-Overlapping output windows are **summed** in the region they overlap by default. Pass `blend=` / `blend_init=` to `InfiniteTensor` to override — see [Custom window blending](#9-custom-window-blending).
+Overlapping output windows are **summed** in the region they overlap by default. Pass `blend` and `blend_init` to InfiniteTensor to override. See [Custom window blending](#9-custom-window-blending).
 
 ## Key Concepts
 
-1. `TensorWindow`: output window specification. Fixed `size`, optional `stride` (defaults to `size`, non-overlapping) and `offset` (defaults to zeros). Your `f` must return a tensor of exactly `size`.
-2. `InfiniteTensor`: immutable tensor with a shape (any number of `None` dims), a deterministic `f`, a declared `dtype` and `device`, and a backing `TileStore`. Can depend on other `InfiniteTensor`s through `args` / `args_windows`.
-3. `TileStore`: owns cached results. Pick one:
-  - `MemoryTileStore`: in-memory, one shared cache for every tensor using that store.
-  - `HDF5TileStore`: persistent, keeps computed results on disk in an HDF5 file so later reads can reuse them. Requires `h5py` (install via the `hdf5` extra).
+1. **TensorWindow**: output window specification. Fixed `size`, optional `stride` (defaults to `size`, non-overlapping) and `offset` (defaults to zeros). Your `f` must return a tensor of exactly `size`.
+2. **InfiniteTensor**: immutable tensor with a shape (any number of `None` dims), a deterministic `f`, a declared `dtype` and `device`, and a backing `TileStore`. Can depend on other `InfiniteTensor`s through `args` / `args_windows`.
+3. **TileStore**: owns cached results. **MemoryTileStore** is the default for in-memory caching, and has one shared cache for every tensor using that store. [Persistent storage with HDF5](#10-persistent-storage-with-hdf5) is also supported.
 
-If you are building your own durable backend, subclass `PersistentTileStore` (`from infinite_tensor.tilestore.persistent import PersistentTileStore`); see [Extending with a custom persistent backend](#extending-with-a-custom-persistent-backend).
+If you are building your own persistent backend, subclass `PersistentTileStore`. See [Extending with a custom persistent backend](#extending-with-a-custom-persistent-backend).
 
 ## Getting Started
 
@@ -215,8 +213,8 @@ For most pipelines you can leave `dimension_map=None` (the default). You only ne
 
 Overlapping windows are summed by default. Two optional `InfiniteTensor` kwargs let you change that rule:
 
-- `blend: Callable[[Tensor, Tensor], Tensor] | None` — elementwise `(existing, incoming) -> combined`. `None` (default) keeps the usual sum behavior.
-- `blend_init: float | int | None` — starting value used before any window contributes to a pixel. `None` (default) means zero. For non-additive blends, set this to the identity of your blend, such as `float("-inf")` for `torch.maximum`.
+- `blend: Callable[[Tensor, Tensor], Tensor] | None`:  elementwise `(existing, incoming) -> combined`. `None` (default) keeps the usual sum behavior.
+- `blend_init: float | int | None`: starting value used before any window contributes to a pixel. `None` (default) means zero. For non-additive blends, set this to the identity of your blend, such as `float("-inf")` for `torch.maximum`.
 
 ```python
 import torch
@@ -300,7 +298,7 @@ Once data is saved to a persistent store, `clear_cache` only drops in-memory buf
 
 This section is only for backend authors.
 
-`PersistentTileStore` provides the shared machinery for disk-backed stores. To plug in a different on-disk format, subclass it and implement the seven required storage methods:
+PersistentTileStore provides the shared machinery for disk-backed stores. To plug in a different on-disk format, subclass it and implement the seven required storage methods:
 
 ```python
 from infinite_tensor.tilestore.persistent import PersistentTileStore
@@ -310,28 +308,10 @@ See `infinite_tensor/tilestore/persistent.py` for the full contract and `hdf5_ti
 
 ## Important Notes
 
-1. **Deterministic `f`**: stored outputs assume `f` is pure. Non-determinism can make cached results disagree with fresh recomputation and can corrupt dependent tensors.
-2. **Exact output shape**: `f`'s return must match `TensorWindow.size` exactly (`ShapeMismatchError` otherwise).
-3. **Device and dtype**: every `InfiniteTensor` declares a `device` and `dtype` (defaults: `cpu`, `torch.float32`). `f` must return tensors on that exact device and with that exact dtype (`DeviceMismatchError` / `DtypeMismatchError` otherwise). Upstream arg slices are **not** auto-transferred; move or cast them inside `f` if they come from a different device/dtype.
-4. **Finite dimensions must fit in memory**: non-`None` dims are materialized whole whenever a window touches them.
-5. **Reconnecting**: to reuse stored data, re-construct the tensor with the same `tensor_id` against the same store. Its saved configuration must still match, or construction raises `ValidationError`.
-6. **Avoid manual slicing of dependencies**: use `args` / `args_windows`. Manual indexing inside `f` bypasses batching and can trigger extra work.
-7. **Exploding compute**: each layer in a dependency chain can enlarge the region that has to be read from upstream, especially when windows overlap or include padding. A deep chain can make a small output slice trigger much more work than expected. Keep chains shallow when possible, and prefer one larger `f` over many thin layers if performance becomes a problem.
-8. **Immutability of persistent stores**: once data is saved in `HDF5TileStore`, you cannot mark it as missing again without deleting that tensor's stored state with `tile_store.clear_tensor(...)`.
-
-## Public exceptions
-
-All live at `infinite_tensor` top level:
-
-
-| Exception             | Raised when                                                                                                   |
-| --------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `InfiniteTensorError` | base class for everything below                                                                               |
-| `ValidationError`     | invalid constructor arguments, reconnecting with a different saved configuration, unsupported dtype migration |
-| `ShapeMismatchError`  | `f` returned a tensor whose shape differs from `TensorWindow.size`                                            |
-| `DeviceMismatchError` | `f` returned a tensor on a different device than the tensor was declared with                                 |
-| `DtypeMismatchError`  | `f` returned a tensor with a different dtype than the tensor was declared with                                |
-
+1. **Deterministic `f`**: stored outputs assume `f` is pure. Non-determinism can make cached results disagree with fresh recomputation and can corrupt dependent tensors. This is only an issue if you have a bounded cache.
+2. **Finite dimensions must fit in memory**: non-`None` dims are materialized whole whenever a window touches them.
+3. **Avoid manual slicing of dependencies**: use `args` / `args_windows`. Manual indexing inside `f` bypasses batching and can trigger extra work.
+4. **Exploding compute**: each layer in a dependency chain can enlarge the region that has to be read from upstream, especially when windows overlap or include padding. A deep chain can make a small output slice trigger much more work than expected. Keep chains shallow when possible, and prefer one larger `f` over many thin layers if performance becomes a problem.
 
 ## Example
 
