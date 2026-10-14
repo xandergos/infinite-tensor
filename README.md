@@ -72,6 +72,18 @@ result = tensor[0:1024, 0:1024]
 
 `__getitem__` supports integer indices, slices, and negative indices. Integer indices squeeze the dimension; slices preserve it.
 
+To read several regions at once, build each region with `sl` and index with a list of them. You get back a list of tensors in the same order:
+
+```python
+from infinite_tensor import sl
+
+a, b = tensor[[sl[0:512, 0:512], sl[4096:4608, 0:512]]]
+```
+
+`sl[...]` creates a region for batched reads using normal indexing syntax: `sl[0:512, 5]` is the region `tensor[0:512, 5]` would read.
+
+All windows needed by every region are computed in one pass (deduplicated, and batched together when `batch_size` is set) and stay cached until every region has been read. Any list passed to `[]` is treated as a list of regions.
+
 ### 3. Device and dtype
 
 Pass `device=` and/or `dtype=` at construction. `f` must return tensors matching both exactly (`DeviceMismatchError` / `DtypeMismatchError` otherwise). Defaults are `cpu` / `torch.float32`. Upstream arg slices are **not** auto-transferred; if an upstream lives elsewhere, move/cast it inside `f`.

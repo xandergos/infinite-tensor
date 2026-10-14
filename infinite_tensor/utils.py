@@ -7,6 +7,8 @@ converting various indexing formats into consistent internal representations.
 
 from __future__ import annotations
 
+from typing import Any
+
 
 def normalize_slice(idx: int | slice, shape_dim: int | None):
     """Convert an index or slice to a normalized slice format.
@@ -81,10 +83,14 @@ def standardize_indices(
     Raises:
         IndexError: If indices are invalid for the tensor shape
     """
-    if isinstance(indices, list):
-        indices = tuple(indices)
     if not isinstance(indices, tuple):
         indices = (indices,)
+    for idx in indices:
+        if not isinstance(idx, (int, slice)) and idx is not Ellipsis:
+            raise TypeError(
+                f"Invalid index {idx!r}: each index must be an int, slice, or Ellipsis "
+                "(to read several regions, pass a list of regions, e.g. [sl[0:8], sl[16:24]])"
+            )
 
     # Handle ellipsis by expanding it to the appropriate number of full slices
     if Ellipsis in indices:
@@ -148,3 +154,19 @@ def standardize_indices(
     ]
 
     return normalized_slices, collapse_dims
+
+
+class _RegionBuilder:
+    """Build a region from bracket syntax: ``sl[0:512, 5]`` -> ``(slice(0, 512, None), 5)``.
+
+    Always returns a tuple, so ``sl[0:8]`` is a valid one-dimensional region.
+    """
+
+    def __getitem__(self, indices: Any) -> tuple:
+        return indices if isinstance(indices, tuple) else (indices,)
+
+    def __repr__(self) -> str:
+        return "sl"
+
+
+sl = _RegionBuilder()

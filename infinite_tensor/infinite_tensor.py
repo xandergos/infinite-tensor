@@ -403,23 +403,42 @@ class InfiniteTensor:
             raise
         return self
 
-    def __getitem__(self, indices: tuple[int | slice, ...]) -> torch.Tensor:
-        """Return tensor values for the requested pixel-space indices."""
-        pixel_slices, collapse_dims = standardize_indices(self.shape, indices)
-        pixel_slices_tuple: tuple[slice, ...] = tuple(pixel_slices)
-        logger.debug(f"Accessing tensor slice with indices: {pixel_slices_tuple}")
+    def __getitem__(self, indices: Any) -> torch.Tensor | list[torch.Tensor]:
+        """Return tensor values for the requested pixel-space indices.
+
+        ``indices`` is either a single region (ints / slices / ellipsis, as
+        with a normal tensor) or a ``list`` of regions, e.g.
+        ``tensor[[sl[0:512, 0:512], sl[4096:4608, 0:512]]]``. A list always
+        means a list of regions and returns a ``list[torch.Tensor]`` in the
+        same order; every window needed by any region is computed in one pass
+        (deduplicated and batched together) and kept cached until all regions
+        have been read.
+
+        Use ``sl[...]`` (``from infinite_tensor import sl``) to create regions
+        for batched reads: ``sl[0:512, 5]`` is the region ``tensor[0:512, 5]``
+        would read.
+        """
+        is_region_list = isinstance(indices, list)
+        regions = indices if is_region_list else [indices]
+
+        standardized = [standardize_indices(self.shape, region) for region in regions]
+        pixel_regions: list[tuple[slice, ...]] = [tuple(slices) for slices, _ in standardized]
+        logger.debug(f"Accessing tensor slices with indices: {pixel_regions}")
 
         self._store.begin_access(self._uuid)
         try:
-            self._ensure_processed_range([pixel_slices_tuple])
-            result = self._store.read_pixels(self._uuid, pixel_slices_tuple)
+            self._ensure_processed_range(pixel_regions)
+            results = [self._store.read_pixels(self._uuid, region) for region in pixel_regions]
         finally:
             self._store.end_access(self._uuid)
 
-        if collapse_dims:
-            target_shape = tuple(s for i, s in enumerate(result.shape) if i not in collapse_dims)
-            result = result.reshape(target_shape)
-        return result
+        for i, (_, collapse_dims) in enumerate(standardized):
+            if collapse_dims:
+                target_shape = tuple(
+                    s for d, s in enumerate(results[i].shape) if d not in collapse_dims
+                )
+                results[i] = results[i].reshape(target_shape)
+        return results if is_region_list else results[0]
 
     def _ensure_processed_range(self, pixel_ranges: Iterable[tuple[slice, ...]]) -> None:
         """Ensure every window intersecting ``pixel_ranges`` is processed in the store."""

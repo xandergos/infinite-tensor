@@ -10,6 +10,7 @@ from infinite_tensor import (
     InfiniteTensor,
     TensorWindow,
     ValidationError,
+    sl,
 )
 from infinite_tensor.tilestore import MemoryTileStore
 
@@ -646,3 +647,102 @@ class TestPersistentWindowBlend:
 
         expected = torch.tensor([[float(expected_at(r, c)) for c in range(8)] for r in range(8)])
         assert torch.equal(result, expected)
+
+
+class TestRegionListIndexing:
+    """Indexing with a list of regions returns one tensor per region."""
+
+    @staticmethod
+    def _coord_tensor(store, batch_size=None, calls=None):
+        def f(ctx):
+            if calls is not None:
+                calls.append(ctx)
+            if batch_size is not None:
+                return [torch.full((1, 32, 32), float(c[1] * 100 + c[2])) for c in ctx]
+            return torch.full((1, 32, 32), float(ctx[1] * 100 + ctx[2]))
+
+        return InfiniteTensor(
+            (1, None, None),
+            f,
+            TensorWindow((1, 32, 32)),
+            tile_store=store,
+            batch_size=batch_size,
+        )
+
+    def test_region_list_matches_individual_reads(self, tile_store):
+        tensor = self._coord_tensor(tile_store)
+        regions = [
+            sl[:, 0:40, 10:70],
+            sl[0, -32:5, 100:132],
+            sl[0, 33, 0:64:3],
+        ]
+        results = tensor[regions]
+
+        assert isinstance(results, list)
+        assert len(results) == len(regions)
+        for region, result in zip(regions, results):
+            assert torch.equal(result, tensor[region])
+        assert results[0].shape == (1, 40, 60)
+        assert results[1].shape == (37, 32)
+        assert results[2].shape == (22,)
+
+    def test_region_list_computes_shared_windows_once(self, tile_store):
+        calls = []
+        tensor = self._coord_tensor(tile_store, calls=calls)
+        tensor[[sl[0, 0:64, 0:32], sl[0, 32:96, 0:32]]]
+        assert sorted(calls) == [(0, 0, 0), (0, 1, 0), (0, 2, 0)]
+
+    def test_region_list_batches_across_regions(self, tile_store):
+        calls = []
+        tensor = self._coord_tensor(tile_store, batch_size=8, calls=calls)
+        tensor[[sl[0, 0:32, 0:32], sl[0, 320:352, 320:352]]]
+        assert len(calls) == 1
+        assert sorted(calls[0]) == [(0, 0, 0), (0, 10, 10)]
+
+    def test_region_list_held_in_cache_until_all_read(self):
+        store = MemoryTileStore(cache_size_windows=1)
+        calls = []
+        tensor = self._coord_tensor(store, calls=calls)
+        a, b = tensor[[sl[0, 0:32, 0:32], sl[0, 32:64, 0:32]]]
+        assert torch.all(a == 0) and torch.all(b == 100)
+        assert len(calls) == 2
+        assert len(store._windows) == 1
+
+    def test_empty_region_list(self, tile_store):
+        tensor = self._coord_tensor(tile_store)
+        assert tensor[[]] == []
+
+    def test_any_list_is_region_list(self, tile_store):
+        """Bare ints / slices in a list are each their own region, not one combined index."""
+        tensor = InfiniteTensor(
+            (None,),
+            lambda ctx: torch.arange(8, dtype=torch.float32) + 8 * ctx[0],
+            TensorWindow((8,)),
+            tile_store=tile_store,
+        )
+        a, b = tensor[[3, slice(10, 14)]]
+        assert a.shape == () and a.item() == 3.0
+        assert torch.equal(b, torch.arange(10, 14, dtype=torch.float32))
+
+    def test_one_dimensional_regions(self, tile_store):
+        tensor = InfiniteTensor(
+            (None,),
+            lambda ctx: torch.full((8,), float(ctx[0])),
+            TensorWindow((8,)),
+            tile_store=tile_store,
+        )
+        a, b, c = tensor[[sl[0:4], sl[16:24], 9]]
+        assert torch.equal(a, torch.zeros(4))
+        assert torch.equal(b, torch.full((8,), 2.0))
+        assert c.shape == () and c.item() == 1.0
+
+    def test_sl_always_returns_tuple(self):
+        assert sl[0:8] == (slice(0, 8),)
+        assert sl[3] == (3,)
+        assert sl[0:8, 5] == (slice(0, 8), 5)
+        assert sl[..., 0] == (Ellipsis, 0)
+
+    def test_nested_list_raises_type_error(self, tile_store):
+        tensor = self._coord_tensor(tile_store)
+        with pytest.raises(TypeError, match="Invalid index"):
+            tensor[[[0, slice(0, 8), slice(0, 8)]]]
