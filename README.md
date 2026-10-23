@@ -45,9 +45,11 @@ from infinite_tensor import InfiniteTensor, TensorWindow, MemoryTileStore
 
 tile_store = MemoryTileStore()
 
+
 def your_processing_function(ctx):
     # ctx is the window index (e.g. (wy, wx) for 2D), NOT pixel coordinates.
     return torch.ones(512, 512)
+
 
 tensor = InfiniteTensor(
     shape=(None, None),
@@ -87,7 +89,7 @@ All windows needed by every region are computed in one pass (deduplicated, and b
 To get results as they are computed instead of all at once, use `iter_regions`. It processes windows in region order in full batches of the tensor's `batch_size`, and after each batch yields a list of the regions that are now complete:
 
 ```python
-for chunk in tensor.iter_regions(sl[i:i + 512, 0:512] for i in range(0, 8192, 512)):
+for chunk in tensor.iter_regions(sl[i : i + 512, 0:512] for i in range(0, 8192, 512)):
     for result in chunk:
         ...
 ```
@@ -107,7 +109,7 @@ Pass `device=` and/or `dtype=` at construction. `f` must return tensors matching
 ```python
 tile_store = MemoryTileStore(
     cache_size_bytes=200 * 1024 * 1024,  # 200 MB
-    cache_size_windows=None,             # no window-count limit
+    cache_size_windows=None,  # no window-count limit
 )
 ```
 
@@ -146,8 +148,10 @@ WINDOW = 512
 PADDING = 2
 PADDED = WINDOW + 2 * PADDING
 
+
 def random_image(ctx):
     return torch.rand(3, WINDOW, WINDOW)
+
 
 base = InfiniteTensor(
     shape=(3, None, None),
@@ -163,9 +167,11 @@ padded_input_window = TensorWindow(
     offset=(0, -PADDING, -PADDING),
 )
 
+
 def blur(ctx, padded_input):
     blurred = F.gaussian_blur(padded_input, kernel_size=5, sigma=1.0)
     return blurred[:, PADDING:-PADDING, PADDING:-PADDING]
+
 
 blurred = InfiniteTensor(
     shape=(3, None, None),
@@ -192,10 +198,11 @@ Setting `batch_size=N` changes the contract of `f`:
 
 ```python
 def blur_batched(ctxs, padded_inputs):
-    stack = torch.stack(padded_inputs)                      # (B, 3, PADDED, PADDED)
+    stack = torch.stack(padded_inputs)  # (B, 3, PADDED, PADDED)
     blurred = F.gaussian_blur(stack, kernel_size=5, sigma=1.0)
     cropped = blurred[:, :, PADDING:-PADDING, PADDING:-PADDING]
     return [cropped[i] for i in range(cropped.shape[0])]
+
 
 blurred = InfiniteTensor(
     shape=(3, None, None),
@@ -242,9 +249,11 @@ Overlapping windows are summed by default. Two optional `InfiniteTensor` kwargs 
 import torch
 from infinite_tensor import InfiniteTensor, TensorWindow, MemoryTileStore
 
+
 def f(ctx):
     wy, wx = ctx
     return torch.full((64, 64), float(wy + wx))
+
 
 tensor = InfiniteTensor(
     shape=(None, None),
@@ -296,7 +305,7 @@ HDF5TileStore(
     "tensor_data.h5",
     tile_size=512,
     cache_size_bytes=256 * 1024 * 1024,  # 256 MiB cache; default 100 MiB
-    cache_size_tiles=None,               # no tile-count limit
+    cache_size_tiles=None,  # no tile-count limit
 )
 ```
 
@@ -306,12 +315,12 @@ Reconnecting in a later process:
 with HDF5TileStore("tensor_data.h5", tile_size=512) as tile_store:
     tensor = InfiniteTensor(
         shape=(None, None),
-        f=your_processing_function,      # same f, or one that produces the same results
+        f=your_processing_function,  # same f, or one that produces the same results
         output_window=TensorWindow((512, 512)),
         tile_store=tile_store,
         tensor_id="my_infinite_tensor",  # same id as before
     )
-    result = tensor[0:2048, 0:2048]      # served from disk; f is only called for new windows
+    result = tensor[0:2048, 0:2048]  # served from disk; f is only called for new windows
 ```
 
 Once data is saved to a persistent store, `clear_cache` only drops in-memory buffers. Use `tile_store.clear_tensor("my_infinite_tensor")` to fully wipe the saved state for that tensor.
