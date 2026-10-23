@@ -1,5 +1,6 @@
 """Comprehensive tests for InfiniteTensor functionality using pytest."""
 
+import itertools
 import uuid
 
 import pytest
@@ -746,3 +747,72 @@ class TestRegionListIndexing:
         tensor = self._coord_tensor(tile_store)
         with pytest.raises(TypeError, match="Invalid index"):
             tensor[[[0, slice(0, 8), slice(0, 8)]]]
+
+
+class TestIterRegions:
+    """iter_regions yields region results incrementally, following batch_size."""
+
+    @staticmethod
+    def _row_tensor(store, batch_size=None, calls=None):
+        """1D tensor of 8-wide windows; window i is filled with i."""
+
+        def f(ctx):
+            if calls is not None:
+                calls.append(ctx)
+            if batch_size is not None:
+                return [torch.full((8,), float(c[0])) for c in ctx]
+            return torch.full((8,), float(ctx[0]))
+
+        return InfiniteTensor(
+            (None,), f, TensorWindow((8,)), tile_store=store, batch_size=batch_size
+        )
+
+    REGIONS = [sl[0:8], sl[8:24], sl[20:28], sl[3], sl[40:48]]
+
+    @pytest.mark.parametrize("batch_size", [None, 1, 2, 3, 100])
+    def test_concatenated_yields_match_getitem(self, tile_store, batch_size):
+        tensor = self._row_tensor(tile_store, batch_size=batch_size)
+        streamed = [r for chunk in tensor.iter_regions(self.REGIONS) for r in chunk]
+        expected = self._row_tensor(MemoryTileStore())[self.REGIONS]
+        assert len(streamed) == len(expected)
+        for a, b in zip(streamed, expected):
+            assert torch.equal(a, b)
+
+    def test_no_batch_size_yields_single_list(self, tile_store):
+        tensor = self._row_tensor(tile_store)
+        chunks = list(tensor.iter_regions(self.REGIONS))
+        assert [len(c) for c in chunks] == [len(self.REGIONS)]
+
+    def test_batch_size_one_yields_region_by_region(self, tile_store):
+        tensor = self._row_tensor(tile_store, batch_size=1)
+        # Windows per region: [0], [1, 2], [2, 3], [0], [5]
+        # sl[3] only needs window 0 (already done), so it rides along with the next batch.
+        chunks = list(tensor.iter_regions(self.REGIONS))
+        assert [len(c) for c in chunks] == [1, 1, 1, 2]
+
+    def test_batches_stay_full_across_regions(self, tile_store):
+        calls = []
+        tensor = self._row_tensor(tile_store, batch_size=2, calls=calls)
+        chunks = list(tensor.iter_regions(self.REGIONS))
+        assert calls == [[(0,), (1,)], [(2,), (3,)], [(5,)]]
+        assert [len(c) for c in chunks] == [1, 2, 2]
+
+    def test_is_lazy(self, tile_store):
+        calls = []
+        tensor = self._row_tensor(tile_store, batch_size=1, calls=calls)
+        it = tensor.iter_regions(sl[i * 8 : i * 8 + 8] for i in itertools.count())
+        first = next(it)
+        assert torch.equal(first[0], torch.zeros(8))
+        assert calls == [[(0,)]]
+
+    def test_recomputes_evicted_windows(self):
+        store = MemoryTileStore(cache_size_windows=1)
+        tensor = self._row_tensor(store, batch_size=1)
+        # sl[0:16] spans windows 0 and 1, processed in separate batches; window 0
+        # is evicted after the first batch and must be recomputed before reading.
+        (result,) = list(tensor.iter_regions([sl[0:16]]))[0]
+        assert torch.equal(result, torch.cat([torch.zeros(8), torch.ones(8)]))
+
+    def test_empty(self, tile_store):
+        tensor = self._row_tensor(tile_store)
+        assert list(tensor.iter_regions([])) == []

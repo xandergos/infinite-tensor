@@ -3,7 +3,8 @@ from __future__ import annotations
 import itertools
 import logging
 import uuid
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Iterable, Iterator
 from typing import Any, Callable
 
 import torch
@@ -421,24 +422,114 @@ class InfiniteTensor:
         is_region_list = isinstance(indices, list)
         regions = indices if is_region_list else [indices]
 
-        standardized = [standardize_indices(self.shape, region) for region in regions]
-        pixel_regions: list[tuple[slice, ...]] = [tuple(slices) for slices, _ in standardized]
+        standardized = [self._standardize_region(region) for region in regions]
+        pixel_regions = [pixel_region for pixel_region, _ in standardized]
         logger.debug(f"Accessing tensor slices with indices: {pixel_regions}")
 
         self._store.begin_access(self._uuid)
         try:
             self._ensure_processed_range(pixel_regions)
-            results = [self._store.read_pixels(self._uuid, region) for region in pixel_regions]
+            results = self._read_processed_regions(standardized)
+        finally:
+            self._store.end_access(self._uuid)
+        return results if is_region_list else results[0]
+
+    def iter_regions(self, regions: Iterable[Any]) -> Iterator[list[torch.Tensor]]:
+        """Read ``regions`` incrementally, yielding results as their windows are computed.
+
+        Windows are processed in region order, in full batches of
+        ``batch_size``. After each batch, every leading region whose windows
+        are all processed is read and yielded as a list, so concatenating the
+        yielded lists gives the same result as ``tensor[list(regions)]``.
+        With ``batch_size=None`` everything is processed in one pass and
+        yielded as a single list; with ``batch_size=1`` results arrive about
+        one region at a time.
+
+        ``regions`` may be any iterable (including a lazy generator) of
+        regions, e.g. ``tensor.iter_regions(sl[0, i:i + 64] for i in range(0, 1024, 64))``.
+        Regions that are already cached are yielded with the next batch.
+        """
+        waiting: deque[tuple[tuple[tuple[slice, ...], list[int]], int]] = deque()
+        pending: list[tuple[int, ...]] = []
+        pending_set: set[tuple[int, ...]] = set()
+        batch_id = 0  # id of the batch ``pending`` is filling; lower ids are processed
+
+        def run_batch_if_full() -> Iterator[list[torch.Tensor]]:
+            nonlocal pending, pending_set, batch_id
+            if len(pending) == self.batch_size:
+                results = self._run_batch_and_read_completed(pending, waiting, batch_id + 1)
+                pending, pending_set = [], set()
+                batch_id += 1
+                if results:
+                    yield results
+
+        for region in regions:
+            standardized = self._standardize_region(region)
+            needs_batch = -1
+            for window_index in self.output_window.intersecting_windows(
+                standardized[0], tensor_shape=self.shape
+            ):
+                if window_index in pending_set:
+                    needs_batch = batch_id
+                elif not self._store.is_window_processed(self._uuid, window_index):
+                    yield from run_batch_if_full()
+                    pending.append(window_index)
+                    pending_set.add(window_index)
+                    needs_batch = batch_id
+            waiting.append((standardized, needs_batch))
+            # Check again here so a region whose last window fills the batch is yielded right away.
+            yield from run_batch_if_full()
+
+        if pending or waiting:
+            results = self._run_batch_and_read_completed(pending, waiting, batch_id + 1)
+            if results:
+                yield results
+
+    def _run_batch_and_read_completed(
+        self,
+        pending: list[tuple[int, ...]],
+        waiting: deque[tuple[tuple[tuple[slice, ...], list[int]], int]],
+        processed_batches: int,
+    ) -> list[torch.Tensor]:
+        """Process ``pending``, then pop and read the leading ``waiting`` regions that are complete."""
+        ready = []
+        while waiting and waiting[0][1] < processed_batches:
+            ready.append(waiting.popleft()[0])
+
+        self._store.begin_access(self._uuid)
+        try:
+            self._ensure_processed(pending)
+            # Re-check ready regions: windows from earlier batches may have been evicted.
+            self._ensure_processed_range([pixel_region for pixel_region, _ in ready])
+            return self._read_processed_regions(ready)
         finally:
             self._store.end_access(self._uuid)
 
-        for i, (_, collapse_dims) in enumerate(standardized):
+    def _standardize_region(self, region: Any) -> tuple[tuple[slice, ...], list[int]]:
+        """Normalize one user region to ``(pixel_slices, collapse_dims)``."""
+        pixel_slices, collapse_dims = standardize_indices(self.shape, region)
+        return tuple(pixel_slices), collapse_dims
+
+    def _read_processed_regions(
+        self, regions: list[tuple[tuple[slice, ...], list[int]]]
+    ) -> list[torch.Tensor]:
+        """Read standardized regions whose windows are all already processed.
+
+        Does not compute anything: the caller must have run
+        ``_ensure_processed_range`` on these regions within the same
+        ``begin_access`` / ``end_access`` bracket. Integer-indexed dims are
+        squeezed from each result.
+        """
+        results = []
+        for pixel_region, collapse_dims in regions:
+            result = self._store.read_pixels(self._uuid, pixel_region)
             if collapse_dims:
                 target_shape = tuple(
-                    s for d, s in enumerate(results[i].shape) if d not in collapse_dims
+                    s for d, s in enumerate(result.shape) if d not in collapse_dims
                 )
-                results[i] = results[i].reshape(target_shape)
-        return results if is_region_list else results[0]
+                result = result.reshape(target_shape)
+            results.append(result)
+        return results
 
     def _ensure_processed_range(self, pixel_ranges: Iterable[tuple[slice, ...]]) -> None:
         """Ensure every window intersecting ``pixel_ranges`` is processed in the store."""

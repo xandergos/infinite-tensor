@@ -84,6 +84,16 @@ a, b = tensor[[sl[0:512, 0:512], sl[4096:4608, 0:512]]]
 
 All windows needed by every region are computed in one pass (deduplicated, and batched together when `batch_size` is set) and stay cached until every region has been read. Any list passed to `[]` is treated as a list of regions.
 
+To get results as they are computed instead of all at once, use `iter_regions`. It processes windows in region order in full batches of the tensor's `batch_size`, and after each batch yields a list of the regions that are now complete:
+
+```python
+for chunk in tensor.iter_regions(sl[i:i + 512, 0:512] for i in range(0, 8192, 512)):
+    for result in chunk:
+        ...
+```
+
+Results come in the same order as the regions, so concatenating the chunks gives `tensor[regions]`. With no `batch_size` you get a single chunk; with `batch_size=1` you get roughly one region at a time. `regions` can be a lazy generator.
+
 ### 3. Device and dtype
 
 Pass `device=` and/or `dtype=` at construction. `f` must return tensors matching both exactly (`DeviceMismatchError` / `DtypeMismatchError` otherwise). Defaults are `cpu` / `torch.float32`. Upstream arg slices are **not** auto-transferred; if an upstream lives elsewhere, move/cast it inside `f`.
