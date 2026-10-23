@@ -11,6 +11,7 @@ from .infinite_tensor import (
 )
 from .tensor_window import TensorWindow
 from .tilestore import MemoryTileStore
+from .utils import sl
 
 # Optional HDF5 support
 try:
@@ -35,6 +36,7 @@ __all__ = [
     "ValidationError",
     "TensorWindow",
     "MemoryTileStore",
+    "sl",
 ]
 
 if _HAS_HDF5:
